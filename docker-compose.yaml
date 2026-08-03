@@ -1,0 +1,32 @@
+version: '3.9'
+
+services:
+  senflare-ip:
+    image: "allurelove98/senflare-ip:latest"
+    container_name: senflare-ip
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+
+    environment:
+      TZ: Asia/Shanghai
+      GIT_PUSH_ENABLED: "${GIT_PUSH_ENABLED:-false}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      GITHUB_REPOSITORY: "${GITHUB_REPOSITORY:-}"
+      GIT_USER_NAME: "${GIT_USER_NAME:-GitHub Action}"
+      GIT_USER_EMAIL: "${GIT_USER_EMAIL:-action@github.com}"
+      COMMIT_MESSAGE: "${COMMIT_MESSAGE:-Update IP results}"
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      ALL_PROXY: "${ALL_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1}"
+
+    networks:
+      VBR-LAN2-vlan:
+        ipv4_address: 10.0.240.1
+
+
+networks:
+  VBR-LAN2-vlan:
+    external: true
