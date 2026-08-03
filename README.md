@@ -68,24 +68,26 @@ networks:
 cp config.example.json config.json
 ```
 
-| 配置项                      | 默认      | 说明                    |
-| --------------------------- | --------- | ----------------------- |
-| `ip_sources`                | 16 个源   | 采集的公开 IP 列表地址  |
-| `test_ports`                | 11 个端口 | TCP 测试端口            |
-| `timeout`                   | 15        | 请求超时（秒）          |
-| `api_timeout`               | 5         | API 超时（秒）          |
-| `query_interval`            | 0.5       | 采集请求间隔            |
-| `max_workers`               | 15        | 采集并发                |
-| `batch_size`                | 30        | 批次大小                |
-| `cache_ttl_hours`           | 168       | IP 缓存有效期（小时）   |
-| `quick_filter_ports`        | [443]     | 快速过滤端口            |
-| `region_workers`            | 10        | 地区识别并发            |
-| `bandwidth_workers`         | 5         | 测速并发                |
-| `advanced_mode`             | true      | 进阶模式（Pro/Ranking） |
-| `bandwidth_test_count`      | 3         | 测速次数                |
-| `bandwidth_test_size_mb`    | 50        | 测速文件大小（MB）      |
-| `latency_filter_percentage` | 40        | 延迟过滤比例（%）       |
-| `use_proxy_for_collection`  | true      | 采集是否走代理          |
+| 配置项                      | 默认      | 说明                                |
+| --------------------------- | --------- | ----------------------------------- |
+| `ip_sources`                | 16 个源   | 采集的公开 IP 列表地址              |
+| `ips_sources`               | 1 个源    | CIDR 网段源（可选，扫描 CF 官方段） |
+| `cidr_ips_per_segment`      | 10        | 每网段采样 IP 数（可选）            |
+| `test_ports`                | 11 个端口 | TCP 测试端口                        |
+| `timeout`                   | 15        | 请求超时（秒）                      |
+| `api_timeout`               | 5         | API 超时（秒）                      |
+| `query_interval`            | 0.5       | 采集请求间隔                        |
+| `max_workers`               | 15        | 采集并发                            |
+| `batch_size`                | 30        | 批次大小                            |
+| `cache_ttl_hours`           | 168       | IP 缓存有效期（小时）               |
+| `quick_filter_ports`        | [443]     | 快速过滤端口                        |
+| `region_workers`            | 10        | 地区识别并发                        |
+| `bandwidth_workers`         | 5         | 测速并发                            |
+| `advanced_mode`             | true      | 进阶模式（Pro/Ranking）             |
+| `bandwidth_test_count`      | 3         | 测速次数                            |
+| `bandwidth_test_size_mb`    | 50        | 测速文件大小（MB）                  |
+| `latency_filter_percentage` | 40        | 延迟过滤比例（%）                   |
+| `use_proxy_for_collection`  | true      | 采集是否走代理                      |
 
 ### 运行参数（`env` 区块）
 

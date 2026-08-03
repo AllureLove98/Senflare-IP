@@ -1,5 +1,5 @@
 """
-Cloudflare优选IP采集器 v2.3.0
+Cloudflare优选IP采集器 v2.4.0
 ===============================================
 
 一个高效、智能的Cloudflare优选IP采集和检测工具，专为网络优化而设计。
@@ -7,6 +7,7 @@ Cloudflare优选IP采集器 v2.3.0
 🎯 核心功能
 -----------
 • IP采集：多API源并发采集，获取大量候选IP地址
+• IP段扫描：从CIDR网段源（如Cloudflare官方ips-v4）随机采样IP，发现公开列表外的优选IP
 • 智能筛选：TCP连接测试快速剔除不可用IP
 • 性能测试：TCP Ping延迟测试 + HTTP带宽测试
 • 地区识别：自动识别IP地理位置，支持缓存机制
@@ -42,8 +43,8 @@ Cloudflare优选IP采集器 v2.3.0
 • 智能缓存管理，支持TTL和大小限制
 
 作者：Senflare
-版本：v2.3.0
-更新：2025年10月25日
+版本：v2.4.0
+更新：2026年8月3日
 """
 
 # ===== 标准库导入 =====
@@ -59,6 +60,8 @@ import json
 import logging
 import sys
 import threading
+import random
+import ipaddress
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
@@ -453,6 +456,100 @@ def delete_file_if_exists(file_path: str) -> None:
             logger.info(f"🗑️ 已删除原有文件: {file_path}")
         except Exception as e:
             logger.warning(f"⚠️ 删除文件失败: {str(e)}")
+
+# ===== IP段采集模块 =====
+# Cloudflare CIDR 网段扫描支持：从段源（如官方 ips-v4）获取网段并采样IP
+
+def sample_ips_from_cidr(network: ipaddress.IPv4Network, count: int) -> list:
+    """
+    从单个CIDR网段中采样IP地址
+
+    小网段（地址总数 <= count）直接枚举全部；大网段随机采样 count 个，
+    避免为巨型网段生成海量候选。网络/广播地址也会被采样，反正会被TCP筛选剔除。
+
+    Args:
+        network (ipaddress.IPv4Network): 已解析的IPv4网段
+        count (int): 大网段随机采样数量
+
+    Returns:
+        list: 采样出的IP字符串列表
+    """
+    start = int(network.network_address)
+    end = int(network.broadcast_address)
+    total = end - start + 1
+
+    if total <= count:
+        # 小网段：全部生成
+        return [str(ipaddress.IPv4Address(i)) for i in range(start, end + 1)]
+
+    # 大网段：随机采样 count 个（带重试上限，避免极端情况下死循环）
+    picked = set()
+    attempts = 0
+    while len(picked) < count and attempts < count * 20:
+        picked.add(random.randint(start, end))
+        attempts += 1
+    return [str(ipaddress.IPv4Address(i)) for i in picked]
+
+
+def collect_cidr_ips(cidr_sources: list, per_segment: int = 10) -> list:
+    """
+    从CIDR段源采集网段并采样IP地址
+
+    请求每个段源，用正则提取其中的 IPv4 CIDR（如 173.245.48.0/20），
+    解析后按 per_segment 从每个网段采样若干 IP 返回。
+
+    Args:
+        cidr_sources (list): 段源 URL 列表
+        per_segment (int): 每个网段采样的IP数量（自动限制在 1-50）
+
+    Returns:
+        list: 采样出的IP字符串列表
+    """
+    per_segment = max(1, min(int(per_segment), 50))
+    sampled_ips = []
+    successful = 0
+    failed = 0
+    total_cidrs = 0
+
+    for i, url in enumerate(cidr_sources):
+        try:
+            logger.info(f"🔍 从IP段源 {url} 采集CIDR网段...")
+            if i > 0:
+                time.sleep(CONFIG["query_interval"])
+            resp = collection_session.get(url, timeout=CONFIG["timeout"])
+            logger.debug(f"🔍 {url} 响应状态 {resp.status_code}，内容 {len(resp.text)} 字节")
+
+            if resp.status_code == 200:
+                cidrs = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}/\d{1,2}\b', resp.text)
+                networks = []
+                for cidr in cidrs:
+                    try:
+                        network = ipaddress.ip_network(cidr, strict=False)
+                        if network.version == 4:
+                            networks.append(network)
+                    except ValueError:
+                        continue
+                # 网段去重
+                networks = list(dict.fromkeys(networks))
+                total_cidrs += len(networks)
+
+                segment_count = 0
+                for network in networks:
+                    segment_ips = sample_ips_from_cidr(network, per_segment)
+                    sampled_ips.extend(segment_ips)
+                    segment_count += len(segment_ips)
+
+                successful += 1
+                logger.info(f"✅ 段源 {url} 解析到 {len(networks)} 个IPv4网段，采样 {segment_count} 个IP")
+            else:
+                failed += 1
+                logger.warning(f"❌ 段源 {url} 失败（状态码 {resp.status_code}）")
+        except Exception as e:
+            failed += 1
+            logger.error(f"❌ 段源 {url} 出错: {str(e)[:50]}")
+
+    logger.info(f"📊 段源采集统计: 成功 {successful} 个源，失败 {failed} 个源，共解析 {total_cidrs} 个网段")
+    return sampled_ips
 
 # ===== 网络检测模块 =====
 # 网络连接测试功能，包括TCP连接、延迟测试、带宽测试等
@@ -1213,6 +1310,17 @@ def main() -> None:
             logger.error(f"❌ 出错: {error_msg}")
     
     logger.info(f"📊 采集统计: 成功 {successful_sources} 个源，失败 {failed_sources} 个源")
+
+    # 2.5 IP段扫描（可选）：从 CIDR 段源采集网段并采样 IP，扩充候选池
+    # 与 ip_sources（具体IP列表）互补，可发现未被公开列表覆盖的 Cloudflare IP
+    cidr_sources = CONFIG.get('ips_sources') or []
+    if cidr_sources:
+        logger.info("📥 ===== 采集IP段（CIDR扫描） =====")
+        cidr_ips = collect_cidr_ips(cidr_sources, CONFIG.get('cidr_ips_per_segment', 10))
+        logger.info(f"🔢 IP段扫描共采样 {len(cidr_ips)} 个IP地址")
+        all_ips.extend(cidr_ips)
+    else:
+        logger.info("ℹ️ 未配置 ips_sources，跳过IP段扫描（如需扫描 Cloudflare 官方网段，请配置 https://www.cloudflare.com/ips-v4）")
 
     # 3. IP去重与排序
     # 对采集到的IP进行去重和排序，确保唯一性
