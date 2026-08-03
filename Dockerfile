@@ -24,10 +24,8 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 拷贝程序文件
+# 拷贝程序文件（不内置 config.json：全部配置必须由外部挂载提供，缺失时程序启动即报错退出）
 COPY IPtest.py entrypoint.sh ./
-# 内置默认配置文件（用户可通过挂载 config.json 覆盖，实现开箱即用）
-COPY config.example.json ./config.json
 
 RUN chmod +x /app/entrypoint.sh
 

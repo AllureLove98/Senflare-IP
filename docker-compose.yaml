@@ -1,19 +1,14 @@
 version: '3.9'
 
-# ===== Senflare-IP 开箱即用部署 =====
-# 镜像已内置 IPtest.py、entrypoint.sh 和默认 config.json，pull 后直接 up 即可运行。
+# ===== Senflare-IP 部署 =====
+# ⚠️ 镜像不内置任何默认配置：config.json 必须挂载，否则容器启动即报错退出（防止"配置没生效"）
 #
-# 自定义配置（优先级：环境变量 > config.json）：
-#   1. 下方 volumes 把宿主机 config.json 挂载进容器（推荐，改完重启即生效）
-#      挂载路径 = 宿主机任意路径:容器内固定路径 /app/config.json（:ro 只读保护）
-#      例如 Windows:  - D:\my-config\config.json:/app/config.json:ro
-#            Linux:   - /home/user/config.json:/app/config.json:ro
-#   2. 也可以把配置放任意目录挂载后，用 CONFIG_FILE 环境变量指向容器内路径
-#      例如: - ./myconf:/app/myconf   +   CONFIG_FILE: /app/myconf/config.json
-#   3. 或者干脆把 environment 里的参数直接写死（env 方式）
-#
-# ⚠️ 镜像默认内置了一份 config.json（构建时 COPY），不挂载就会一直用它——
-#    这就是"重启容器不读取 config"的根因：宿主机改了，容器内看不到。
+# 配置来源（缺一不可）：
+#   1. config.json（配置项：ip_sources、test_ports、超时、并发数等全部运行参数）
+#      下方 volumes 把宿主机 config.json 挂载到容器内固定路径 /app/config.json（:ro 只读保护）
+#      注意：./config.json 是相对 compose 文件所在目录的路径，确保路径正确
+#   2. environment（机密/运行参数：GITHUB_TOKEN、HTTP_PROXY 等，也可写进 config.json 的 env 区块）
+#      env 区块优先级：已设置的容器环境变量 > config.json 的 env 区块
 #
 # 结果输出：取消 output 挂载注释后，运行结果（txt/json/log）会同步到宿主 ./output 目录
 

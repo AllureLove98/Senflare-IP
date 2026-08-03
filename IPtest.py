@@ -57,6 +57,7 @@ import ssl
 import socket
 import json
 import logging
+import sys
 import threading
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -115,112 +116,98 @@ logger = logging.getLogger(__name__)
 PROXY_URL = os.getenv('HTTP_PROXY') or os.getenv('HTTPS_PROXY') or os.getenv('ALL_PROXY') or ''
 PROXY_ENABLED = bool(PROXY_URL)
 
-CONFIG = {
-    # 📥 IP源配置 - 多API源并发采集获取IP地址
-    "ip_sources": [
-        'https://cf.hyli.xyz/', # 行雺
-        # 'https://raw.githubusercontent.com/ymyuuu/IPDB/main/BestCF/bestcfv4.txt', # Ymyuuu
-        'https://ipdb.api.030101.xyz/?type=bestcf&country=true', # Ymyuuu（备用）
-        # 'https://api.uouin.com/cloudflare.html', # 麒麟
-        'https://api.urlce.com/cloudflare.html', # 麒麟（备用）
-        'https://addressesapi.090227.xyz/CloudFlareYes', # Hostmonit
-        'https://cf.090227.xyz/CloudFlareYes', # Hostmonit（备用）
-        # 'https://stock.hostmonit.com/CloudFlareYes', # Hostmonit
-        'https://ipdb.api.030101.xyz/?type=bestcf;bestproxy&country=true', # Mingyu
-        'https://vps789.com/openApi/cfIpTop20', # VPS789-综合排名前20
-        'https://vps789.com/openApi/cfIpApi', # VPS789-动态获取接口
-        'https://www.wetest.vip/page/cloudflare/address_v4.html', # 微测网
-        'https://www.wetest.vip/page/cloudflare/total_v4.html',   # 微测网 
-        'https://cf.090227.xyz/cmcc?ips=50', # CMLiussss-电信
-        'https://cf.090227.xyz/ct?ips=50', # CMLiussss-移动
-        'https://cf.090227.xyz/cu?ips=50', # CMLiussss-联通
-        'https://ip.164746.xyz/ipTop10.html',
-        'https://raw.githubusercontent.com/HandsomeMJZ/cfip/refs/heads/main/full_ips.txt'
-    ],
+# ⚠️ 本程序不内置任何默认参数：全部配置必须来自外部 config.json（配置项）或环境变量（机密/运行参数）
+# 缺失配置项时程序启动即报错退出，杜绝"配置没生效"类问题
+CONFIG: dict = {}
 
-    # 🔍 网络测试配置
-    # HTTPS标准端口: 443
-    # Cloudflare专用端口: 2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8443, 8444
-    "test_ports": [443, 2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8443, 8444],    # TCP连接测试端口（可自定义多个端口，如[443, 2052, 2053]）
-    "timeout": 15,                          # IP采集超时时间（秒）
-    "api_timeout": 5,                       # API查询超时时间（秒）
-    "query_interval": 0.5,                 # API查询间隔时间（秒）
-    
-    # ⚡ 并发处理配置（GitHub Actions环境优化）
-    "max_workers": 15,                      # 最大并发线程数
-    "batch_size": 30,                       # 批量处理IP数量
-    "cache_ttl_hours": 168,                 # 缓存有效期（7天）
-    
-    # 🚀 高级功能配置
-    "quick_filter_ports": [443],            # 快速筛选阶段测试端口（只测443，速度优先）
-    "region_workers": 10,                   # 地区识别并发线程数
-    "bandwidth_workers": 5,                 # 带宽测试并发线程数
-    "advanced_mode": True,                  # 高级模式开关（True=开启，False=关闭）
-    "bandwidth_test_count": 3,              # 带宽测试次数
-    "bandwidth_test_size_mb": 50,             # 带宽测试文件大小（MB）
-    "latency_filter_percentage": 40,        # 延迟排名前百分比（取前40%的IP）
-    "use_proxy_for_collection": True,       # 只在采集IP地址阶段使用代理
-}
+# 程序运行所必需的全部配置键（来自 config.json 顶层，缺失任一都会启动失败并明确提示）
+REQUIRED_CONFIG_KEYS = [
+    'ip_sources',
+    'test_ports',
+    'timeout',
+    'api_timeout',
+    'query_interval',
+    'max_workers',
+    'batch_size',
+    'cache_ttl_hours',
+    'quick_filter_ports',
+    'region_workers',
+    'bandwidth_workers',
+    'advanced_mode',
+    'bandwidth_test_count',
+    'bandwidth_test_size_mb',
+    'latency_filter_percentage',
+    'use_proxy_for_collection',
+]
 
 # ===== 配置文件加载 =====
-# 支持通过外部 config.json 覆盖内置默认配置（开箱即用：无配置文件时使用内置默认值）
+# 本程序不内置默认配置：全部配置项必须完整写在外部 config.json，机密/运行参数用 env 区块或环境变量
 # 配置文件路径可通过环境变量 CONFIG_FILE 指定，默认读取当前目录的 config.json
 CONFIG_FILE = os.getenv('CONFIG_FILE', 'config.json')
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    """递归合并两个字典，override 的键优先（仅 dict 值递归合并，list/标量直接覆盖）"""
-    result = dict(base)
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
 
 def load_config() -> None:
-    """从配置文件加载用户配置并合并到全局 CONFIG（无文件时静默使用默认配置）"""
+    """从外部 config.json 加载全部配置（不内置默认值，配置缺失即报错退出）。
+
+    - 配置项（ip_sources、test_ports 等）：必须完整写在 config.json 顶层
+    - env 区块：运行参数/机密（LOG_LEVEL、GITHUB_TOKEN、HTTP_PROXY 等），
+      写入环境变量（已设置的容器环境变量优先）
+    """
     global CONFIG, PROXY_URL, PROXY_ENABLED
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                user_config = json.load(f)
-            if not isinstance(user_config, dict):
-                logger.warning(f"⚠️ 配置文件 {CONFIG_FILE} 格式错误（应为JSON对象），使用内置默认配置")
-                return
-            # 过滤以 // 开头的注释键（如 config.example.json 中的 "// 说明"）
-            user_config = {k: v for k, v in user_config.items() if not k.startswith('//')}
+    if not os.path.exists(CONFIG_FILE):
+        logger.error(f"❌ 未找到配置文件 {CONFIG_FILE}（本程序不内置默认配置，必须挂载 config.json）")
+        logger.error("   请参考 config.example.json 创建 config.json，并通过 compose 挂载到容器 /app/config.json")
+        sys.exit(1)
 
-            # 提取 env 区块（运行参数，如 GITHUB_TOKEN 等），写入环境变量
-            # 优先级：已设置的环境变量 > config.json 中的 env 区块
-            env_block = user_config.pop('env', None)
-            if isinstance(env_block, dict):
-                applied = 0
-                for key, value in env_block.items():
-                    if value is None:
-                        continue
-                    # 非空环境变量才优先（空串视为未设置），否则 config.json 的 env 区块永远被 compose 默认值拦截
-                    if not os.getenv(key):
-                        if isinstance(value, bool):
-                            value = 'true' if value else 'false'
-                        os.environ[key] = str(value)
-                        applied += 1
-                if applied:
-                    logger.info(f"⚙️ 已从配置文件 env 区块设置 {applied} 个环境变量")
-                # env 区块可能包含 LOG_LEVEL，重新应用日志级别使其生效
-                _apply_log_level()
-                # 若配置了代理，同步更新代理相关全局变量
-                proxy = (os.getenv('HTTP_PROXY') or os.getenv('HTTPS_PROXY')
-                         or os.getenv('ALL_PROXY') or '')
-                if proxy:
-                    PROXY_URL = proxy
-                    PROXY_ENABLED = True
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            user_config = json.load(f)
+    except Exception as e:
+        logger.error(f"❌ 读取配置文件 {CONFIG_FILE} 失败: {str(e)[:80]}，程序退出")
+        sys.exit(1)
 
-            CONFIG = _deep_merge(CONFIG, user_config)
-            logger.info(f"⚙️ 已加载配置文件 {CONFIG_FILE}，覆盖 {len(user_config)} 个配置项")
-        except Exception as e:
-            logger.warning(f"⚠️ 加载配置文件 {CONFIG_FILE} 失败: {str(e)[:50]}，使用内置默认配置")
-    else:
-        logger.info(f"⚙️ 未找到配置文件 {CONFIG_FILE}，使用内置默认配置（开箱即用）")
+    if not isinstance(user_config, dict):
+        logger.error(f"❌ 配置文件 {CONFIG_FILE} 格式错误（应为JSON对象），程序退出")
+        sys.exit(1)
+
+    # 过滤以 // 开头的注释键（如 config.example.json 中的 "// 说明"）
+    user_config = {k: v for k, v in user_config.items() if not k.startswith('//')}
+
+    # 提取 env 区块（运行参数/机密，如 LOG_LEVEL、GITHUB_TOKEN、HTTP_PROXY 等）
+    # 优先级：已设置的容器环境变量 > config.json 中的 env 区块
+    env_block = user_config.pop('env', None)
+    if isinstance(env_block, dict):
+        applied = 0
+        for key, value in env_block.items():
+            if value is None:
+                continue
+            # 非空环境变量才优先（空串视为未设置），否则 env 区块永远被 compose 默认值拦截
+            if not os.getenv(key):
+                if isinstance(value, bool):
+                    value = 'true' if value else 'false'
+                os.environ[key] = str(value)
+                applied += 1
+        if applied:
+            logger.info(f"⚙️ 已从配置文件 env 区块设置 {applied} 个环境变量")
+        # env 区块可能包含 LOG_LEVEL，重新应用日志级别使其生效
+        _apply_log_level()
+        # 若配置了代理，同步更新代理相关全局变量
+        proxy = (os.getenv('HTTP_PROXY') or os.getenv('HTTPS_PROXY')
+                 or os.getenv('ALL_PROXY') or '')
+        if proxy:
+            PROXY_URL = proxy
+            PROXY_ENABLED = True
+
+    # 校验必需配置键：不内置默认值，缺失即启动失败，避免运行中途 KeyError
+    missing = [k for k in REQUIRED_CONFIG_KEYS if k not in user_config]
+    if missing:
+        logger.error(f"❌ 配置文件 {CONFIG_FILE} 缺少必需配置项: {', '.join(missing)}")
+        logger.error("   请参考 config.example.json 补齐后重新启动")
+        sys.exit(1)
+
+    CONFIG = user_config
+    logger.info(f"⚙️ 已加载配置文件 {CONFIG_FILE}，共 {len(CONFIG)} 个配置项")
+
 
 load_config()
 
