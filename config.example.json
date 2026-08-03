@@ -1,6 +1,21 @@
 {
   "// 说明": "Senflare-IP 配置文件模板。复制为 config.json 后按需修改，IPtest.py 会自动读取并覆盖内置默认配置。未包含的配置项使用内置默认值。",
 
+  "// 运行参数说明": "env 区块配置运行/推送相关参数，等价于环境变量。优先级：已设置的环境变量 > 此处配置。GITHUB_TOKEN 等敏感信息建议配合 .env 或 Docker 环境变量注入，避免提交到仓库。",
+  "env": {
+    "RUN_INTERVAL_SECONDS": 10800,
+    "GIT_PUSH_ENABLED": false,
+    "GITHUB_TOKEN": "",
+    "GITHUB_REPOSITORY": "AllureLove98/Senflare-IP",
+    "GIT_USER_NAME": "GitHub Action",
+    "GIT_USER_EMAIL": "action@github.com",
+    "COMMIT_MESSAGE": "Update IP results",
+    "HTTP_PROXY": "",
+    "HTTPS_PROXY": "",
+    "ALL_PROXY": "",
+    "NO_PROXY": "localhost,127.0.0.1"
+  },
+
   "ip_sources": [
     "https://cf.hyli.xyz/",
     "https://ipdb.api.030101.xyz/?type=bestcf&country=true",

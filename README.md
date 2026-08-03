@@ -87,6 +87,24 @@ cp config.example.json config.json
 | `latency_filter_percentage` | 40        | 延迟过滤比例（%）       |
 | `use_proxy_for_collection`  | true      | 采集是否走代理          |
 
+### 运行参数（`env` 区块）
+
+`GITHUB_TOKEN` 等运行/推送参数通过 `env` 区块配置，也可直接用环境变量（环境变量优先）。
+
+| 配置项                                 | 默认                     | 说明                                 |
+| -------------------------------------- | ------------------------ | ------------------------------------ |
+| `RUN_INTERVAL_SECONDS`                 | 10800                    | 运行间隔（秒）                       |
+| `GIT_PUSH_ENABLED`                     | false                    | 是否推送结果到 GitHub                |
+| `GITHUB_TOKEN`                         | ""                       | GitHub Token（敏感，建议用环境变量） |
+| `GITHUB_REPOSITORY`                    | AllureLove98/Senflare-IP | 推送目标仓库                         |
+| `GIT_USER_NAME`                        | GitHub Action            | Git 提交用户名                       |
+| `GIT_USER_EMAIL`                       | action@github.com        | Git 提交邮箱                         |
+| `COMMIT_MESSAGE`                       | Update IP results        | 提交信息                             |
+| `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` | ""                       | 代理地址（如 Clash）                 |
+| `NO_PROXY`                             | localhost,127.0.0.1      | 不走代理的地址                       |
+
+> 💡 `GITHUB_TOKEN` 等敏感信息不建议写入 `config.json` 并提交，推荐用 `.env` 或 Docker 环境变量注入。
+
 ---
 
 ## 🔄 Docker Hub 自动构建

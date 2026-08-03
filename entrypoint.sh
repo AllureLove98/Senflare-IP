@@ -3,6 +3,27 @@ set -eu
 
 cd /app
 
+# 从 config.json 的 env 区块加载运行参数（如 GITHUB_TOKEN 等）
+# 优先级：已设置的环境变量 > config.json 中的 env 区块
+if [ -f /app/config.json ]; then
+  eval "$(python - <<'PY'
+import json, os, shlex
+try:
+    with open('/app/config.json', encoding='utf-8') as f:
+        cfg = json.load(f)
+    env_block = cfg.get('env') or {}
+    for key, value in env_block.items():
+        if value is None or os.environ.get(key) is not None:
+            continue
+        if isinstance(value, bool):
+            value = 'true' if value else 'false'
+        print(f'export {key}={shlex.quote(str(value))}')
+except Exception as e:
+    print(f'echo "[entrypoint] 读取 config.json env 区块失败: {e}"')
+PY
+)"
+fi
+
 INTERVAL_SECONDS="${RUN_INTERVAL_SECONDS:-10800}"
 LOG_PREFIX="[entrypoint]"
 

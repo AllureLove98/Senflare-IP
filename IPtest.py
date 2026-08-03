@@ -154,7 +154,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 def load_config() -> None:
     """从配置文件加载用户配置并合并到全局 CONFIG（无文件时静默使用默认配置）"""
-    global CONFIG
+    global CONFIG, PROXY_URL, PROXY_ENABLED
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -164,6 +164,29 @@ def load_config() -> None:
                 return
             # 过滤以 // 开头的注释键（如 config.example.json 中的 "// 说明"）
             user_config = {k: v for k, v in user_config.items() if not k.startswith('//')}
+
+            # 提取 env 区块（运行参数，如 GITHUB_TOKEN 等），写入环境变量
+            # 优先级：已设置的环境变量 > config.json 中的 env 区块
+            env_block = user_config.pop('env', None)
+            if isinstance(env_block, dict):
+                applied = 0
+                for key, value in env_block.items():
+                    if value is None:
+                        continue
+                    if os.getenv(key) is None:
+                        if isinstance(value, bool):
+                            value = 'true' if value else 'false'
+                        os.environ[key] = str(value)
+                        applied += 1
+                if applied:
+                    logger.info(f"⚙️ 已从配置文件 env 区块设置 {applied} 个环境变量")
+                # 若配置了代理，同步更新代理相关全局变量
+                proxy = (os.getenv('HTTP_PROXY') or os.getenv('HTTPS_PROXY')
+                         or os.getenv('ALL_PROXY') or '')
+                if proxy:
+                    PROXY_URL = proxy
+                    PROXY_ENABLED = True
+
             CONFIG = _deep_merge(CONFIG, user_config)
             logger.info(f"⚙️ 已加载配置文件 {CONFIG_FILE}，覆盖 {len(user_config)} 个配置项")
         except Exception as e:
