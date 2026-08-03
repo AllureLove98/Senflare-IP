@@ -53,6 +53,7 @@ from __future__ import annotations
 import re
 import os
 import time
+import ssl
 import socket
 import json
 import logging
@@ -97,7 +98,6 @@ def _apply_log_level() -> None:
     logging.getLogger().setLevel(level)  # 根 logger 级别（控制台/文件 handler 均受其约束）
     if 'logger' in globals():
         logger.setLevel(level)  # 模块 logger 显式同步，避免 NOTSET 继承歧义
-    return level
 
 
 logging.basicConfig(
@@ -553,18 +553,108 @@ def quick_filter_ip(ip: str) -> tuple:
     """
     return tcp_connect_test(ip, CONFIG["quick_filter_ports"], timeout=0.5)
 
-def test_ip_bandwidth_only(ip: str, current: int, total: int, sess: requests.Session | None = None) -> tuple:
-    """
-    通过HTTP下载测试IP带宽性能
+def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
+                           download_timeout: float = 5, sni: str = 'speed.cloudflare.com') -> tuple:
+    """HTTPS 直连 IP 测速（自定义 SNI 指向合法域名，绕过 Cloudflare 对 SNI=IP 的拒绝）
 
-    使用真实的HTTP下载测试来测量IP的带宽性能：
+    为什么不用 requests：requests/urllib3 的 SNI 取自 URL 的 host，
+    直连 https://{ip} 时 SNI=IP 字面量会被 Cloudflare 边缘拒绝（SSLV3_ALERT_HANDSHAKE_FAILURE）。
+    这里手写 socket+ssl，把 SNI 指向 speed.cloudflare.com（合法域名），
+    TCP 目标仍是被测 IP，从而真正测出该 IP 到本地的速度。
+
+    Args:
+        ip (str): 被测 IP
+        size_bytes (int): 期望下载字节数
+        connect_timeout (float): 连接超时（秒）
+        download_timeout (float): 下载超时（秒）
+        sni (str): TLS SNI 与 Host 头指向的合法域名
+
+    Returns:
+        tuple: (速度Mbps, 延迟毫秒, 失败原因字符串) - 失败时速度/延迟为 0，原因用于 debug 诊断
+    """
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        sock = socket.create_connection((ip, 443), timeout=connect_timeout)
+        try:
+            ssock = ctx.wrap_socket(sock, server_hostname=sni)
+        except Exception as e:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return (0, 0, f"TLS握手失败: {str(e)[:40]}")
+
+        start_total = time.time()
+        req = (f"GET /__down?bytes={size_bytes} HTTP/1.1\r\n"
+               f"Host: {sni}\r\n"
+               f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n"
+               f"Connection: close\r\n"
+               f"Accept: */*\r\n\r\n")
+        ssock.sendall(req.encode())
+
+        # 读取响应头（限制大小防异常）
+        buf = b''
+        while b'\r\n\r\n' not in buf:
+            chunk = ssock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+            if len(buf) > 65536:
+                break
+        header, _, body = buf.partition(b'\r\n\r\n')
+        status_line = header.split(b'\r\n')[0].decode(errors='replace')
+        if b' 200 ' not in header:
+            try:
+                ssock.close()
+            except Exception:
+                pass
+            return (0, 0, f"HTTP {status_line}")
+
+        # 首次字节耗时近似连接延迟
+        latency = (time.time() - start_total) * 1000
+
+        # 流式读取 body 计算速度
+        ssock.settimeout(download_timeout)
+        start_download = time.time()
+        total = len(body)
+        while total < size_bytes:
+            if time.time() - start_download > download_timeout:
+                break
+            try:
+                chunk = ssock.recv(8192)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            total += len(chunk)
+        dur = time.time() - start_download
+        try:
+            ssock.close()
+        except Exception:
+            pass
+
+        if dur > 0.05 and total > 0:
+            mbps = (total * 8) / (dur * 1000000)
+            return (mbps, latency, f"下载{total / 1024 / 1024:.1f}MB/{dur:.2f}s")
+        return (0, 0, "无有效下载数据")
+    except Exception as e:
+        return (0, 0, f"连接失败: {str(e)[:40]}")
+
+
+def test_ip_bandwidth_only(ip: str, current: int, total: int) -> tuple:
+    """
+    通过HTTPS直连下载测试IP带宽性能
+
+    使用真实的HTTPS下载测试来测量IP的带宽性能：
+    手写 socket+ssl 直连被测IP的443端口（SNI 指向 speed.cloudflare.com），
     通过下载指定大小的文件来评估网络速度。
 
     Args:
         ip (str): 要测试的IP地址
         current (int): 当前测试序号
         total (int): 总测试数量
-        sess (requests.Session): 可选的会话对象，并发场景下传入线程独立会话
 
     Returns:
         tuple: (是否成功, 带宽Mbps, 延迟毫秒) - (bool, float, float)
@@ -574,29 +664,21 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int, sess: requests.Ses
         if not is_valid_ipv4(ip):
             return (False, 0, 0)
 
-        # 并发场景使用线程独立会话，避免共享全局session
-        http = sess if sess is not None else session
-
         # 总测试超时时间（秒）
         TOTAL_TIMEOUT = 15
-        # 每个请求的超时 (连接, 读取)
-        REQUEST_TIMEOUT = (3, 5)
-        # 每个请求下载数据的最长等待时间
+        # 下载超时（秒）
         DOWNLOAD_TIMEOUT = 5
 
         start_total = time.time()
         test_size_bytes = CONFIG["bandwidth_test_size_mb"] * 1024 * 1024
-        # 直连被测IP测速（HTTP明文 + Host头），真正测出该IP到本地的速度
-        # 参考主流工具（XIU2/CloudflareSpeedTest）做法
-        # 注意不能用 https://{ip}：SNI=IP 字面量会被 Cloudflare 边缘拒绝
-        test_urls = [
-            f"http://{ip}/__down?bytes={test_size_bytes}",
-        ]
+        # HTTPS 直连被测IP测速（SNI 指向 speed.cloudflare.com），真正测出该IP到本地的速度
+        # 不能用 http://{ip}：80端口明文HTTP在部分网络环境被阻断；不能 https://{ip}：SNI=IP 被 Cloudflare 拒绝
 
         best_speed = 0
         best_latency = 0
         test_count = CONFIG["bandwidth_test_count"]
         timed_out = False  # 总超时标记：超时视为失败，防止返回不可靠的部分数据速度
+        last_reason = ''
 
         for test_attempt in range(test_count):
             # 检查总超时
@@ -605,61 +687,28 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int, sess: requests.Ses
                 logger.debug(f"⏱️ IP {ip} 带宽测试总超时（>{TOTAL_TIMEOUT}s），放弃")
                 break
 
-            for url in test_urls:
-                # 再次检查总超时（每次请求前）
-                if time.time() - start_total > TOTAL_TIMEOUT:
-                    timed_out = True
-                    break
-
-                try:
-                    start_time = time.time()
-                    response = http.get(
-                        url,
-                        timeout=REQUEST_TIMEOUT,
-                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                                 'Host': 'speed.cloudflare.com'},
-                        stream=True,
-                    )
-                    if response.status_code == 200:
-                        data_size = 0
-                        start_download = time.time()
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                data_size += len(chunk)
-                                # 单次下载超时检测（保持截断，避免测试过久）
-                                if time.time() - start_download > DOWNLOAD_TIMEOUT:
-                                    break
-                                # 积累足够数据即停止
-                                if data_size >= test_size_bytes:
-                                    break
-
-                        download_time = time.time() - start_download
-                        latency = (start_download - start_time) * 1000
-
-                        if download_time > 0 and data_size > 0:
-                            speed_mbps = (data_size * 8) / (download_time * 1000000)
-                            if speed_mbps > best_speed:
-                                best_speed = speed_mbps
-                                if latency > 0:
-                                    best_latency = latency
-
-                            # 速度很好，提前返回
-                            if speed_mbps > 100:
-                                logger.info(f"⚡ [{current}/{total}] {ip}（带宽综合速度：{best_speed:.2f}Mbps）")
-                                return (True, best_speed, best_latency)
-                except Exception as e:
-                    logger.debug(f"IP {ip} 带宽测试请求异常: {str(e)[:50]}")
-                    continue
+            speed, latency, reason = _download_speed_direct(
+                ip, test_size_bytes, connect_timeout=3, download_timeout=DOWNLOAD_TIMEOUT)
+            if speed <= 0:
+                last_reason = reason
+            if speed > best_speed:
+                best_speed = speed
+                if latency > 0:
+                    best_latency = latency
+            # 速度很好，提前结束测试
+            if speed > 100:
+                break
 
         if timed_out:
             # 总超时视为失败：部分下载数据计算出的速度不可靠，不能计入结果
             logger.debug(f"⏱️ [{current}/{total}] {ip} 带宽测试超时，标记失败")
             return (False, 0, 0)
         if best_speed > 0:
-            logger.info(f"⚡ [{current}/{total}] {ip}（带宽综合速度：{best_speed:.2f}Mbps）")
+            logger.debug(f"⚡ [{current}/{total}] {ip}（带宽综合速度：{best_speed:.2f}Mbps）")
             return (True, best_speed, best_latency)
         else:
-            logger.info(f"⚡ [{current}/{total}] {ip}（带宽测试失败）")
+            # 失败原因降为 debug，避免大量失败IP刷屏（汇总统计见并发完成日志）
+            logger.debug(f"⚡ [{current}/{total}] {ip}（带宽测试失败: {last_reason or '未知原因'}）")
             return (False, 0, 0)
     except Exception as e:
         logger.error(f"IP {ip} 带宽测试异常: {str(e)[:50]}")
@@ -669,8 +718,8 @@ def test_bandwidth_concurrently(ips: list, max_workers: int | None = None) -> li
     """
     并发带宽测试 - 使用线程池同时测试多个IP的带宽
 
-    每个工作线程使用独立的 requests.Session，避免共享全局会话的
-    线程安全问题。单IP内部仍有总超时/下载超时保护，防止卡住。
+    每个工作线程独立执行 HTTPS 直连测速（socket+ssl，无共享会话）。
+    单IP内部仍有总超时/下载超时保护，防止卡住。
 
     Args:
         ips (list): IP列表，格式为[(ip, delay), ...]
@@ -685,19 +734,10 @@ def test_bandwidth_concurrently(ips: list, max_workers: int | None = None) -> li
     logger.info(f"⚡ 开始并发带宽测试 {len(ips)} 个IP，使用 {max_workers} 个线程")
     bandwidth_results = []
     start_time = time.time()
-    thread_local = threading.local()
-
-    def get_worker_session() -> requests.Session:
-        # 每个线程一个独立会话
-        if not hasattr(thread_local, 'sess'):
-            s = requests.Session()
-            s.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
-            thread_local.sess = s
-        return thread_local.sess
 
     def worker(item: tuple, idx: int) -> tuple | None:
         ip, delay = item
-        is_fast, bandwidth, latency = test_ip_bandwidth_only(ip, idx + 1, len(ips), sess=get_worker_session())
+        is_fast, bandwidth, latency = test_ip_bandwidth_only(ip, idx + 1, len(ips))
         if is_fast:
             # 使用TCP Ping测试的延迟数据
             score = calculate_score(delay, delay, bandwidth, 100)
@@ -724,7 +764,10 @@ def test_bandwidth_concurrently(ips: list, max_workers: int | None = None) -> li
         logger.error(f"⚡ 并发带宽测试执行出错: {str(e)[:50]}")
 
     total_time = time.time() - start_time
-    logger.info(f"⚡ 并发带宽测试完成，{len(bandwidth_results)}/{len(ips)} 个IP通过，总耗时: {total_time:.1f}秒")
+    failed = len(ips) - len(bandwidth_results)
+    logger.info(f"⚡ 并发带宽测试完成，{len(bandwidth_results)}/{len(ips)} 个IP通过"
+                + (f"（失败 {failed} 个，可用 DEBUG 日志查看失败原因）" if failed else "")
+                + f"，总耗时: {total_time:.1f}秒")
     return bandwidth_results
 
 
