@@ -3,10 +3,17 @@ version: '3.9'
 # ===== Senflare-IP 开箱即用部署 =====
 # 镜像已内置 IPtest.py、entrypoint.sh 和默认 config.json，pull 后直接 up 即可运行。
 #
-# 自定义配置（三选一，优先级：环境变量 > config.json）：
-#   1. 下方 environment 直接写死（env 方式）
-#   2. 修改本地 config.json 的 env 区块，并取消 volumes 中 config 挂载的注释
-#   3. 通过环境变量 CONFIG_FILE 指定其他路径的配置文件
+# 自定义配置（优先级：环境变量 > config.json）：
+#   1. 下方 volumes 把宿主机 config.json 挂载进容器（推荐，改完重启即生效）
+#      挂载路径 = 宿主机任意路径:容器内固定路径 /app/config.json（:ro 只读保护）
+#      例如 Windows:  - D:\my-config\config.json:/app/config.json:ro
+#            Linux:   - /home/user/config.json:/app/config.json:ro
+#   2. 也可以把配置放任意目录挂载后，用 CONFIG_FILE 环境变量指向容器内路径
+#      例如: - ./myconf:/app/myconf   +   CONFIG_FILE: /app/myconf/config.json
+#   3. 或者干脆把 environment 里的参数直接写死（env 方式）
+#
+# ⚠️ 镜像默认内置了一份 config.json（构建时 COPY），不挂载就会一直用它——
+#    这就是"重启容器不读取 config"的根因：宿主机改了，容器内看不到。
 #
 # 结果输出：取消 output 挂载注释后，运行结果（txt/json/log）会同步到宿主 ./output 目录
 
@@ -17,18 +24,20 @@ services:
     restart: unless-stopped
     working_dir: /app
     volumes:
-      # 可选：自定义配置（取消注释并使用本地 config.json 覆盖镜像默认配置）
-      # - ./config/config.json:/app/config.json:ro
+      # 自定义配置（已启用：宿主机根目录 config.json 覆盖镜像默认配置）
+      - ./config.json:/app/config.json:ro
       # 可选：输出目录（运行结果同步到宿主机）
       # - ./output:/app/output
 
     environment:
       TZ: Asia/Shanghai
-      # 可选：自定义配置文件路径（指向容器内路径）
+      # 可选：自定义配置文件路径（指向容器内路径，与上方挂载二选一）
       # CONFIG_FILE: /app/config.json
       # 运行参数也可写在 config.json 的 env 区块（env 方式二选一，环境变量优先）
       # 日志级别：DEBUG=显示全部逐IP明细，INFO=只显示汇总（默认），WARNING/ERROR=仅错误
-      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      # ⚠️ 默认值为空：让 config.json 的 env.LOG_LEVEL 能生效；
+      # 若在 .env / shell 显式设置 LOG_LEVEL，则环境变量优先。
+      LOG_LEVEL: "${LOG_LEVEL:-}"
       # 运行间隔（秒），默认 10800（3小时）
       RUN_INTERVAL_SECONDS: "${RUN_INTERVAL_SECONDS:-10800}"
       GIT_PUSH_ENABLED: "${GIT_PUSH_ENABLED:-false}"

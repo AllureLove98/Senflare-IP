@@ -198,7 +198,8 @@ def load_config() -> None:
                 for key, value in env_block.items():
                     if value is None:
                         continue
-                    if os.getenv(key) is None:
+                    # 非空环境变量才优先（空串视为未设置），否则 config.json 的 env 区块永远被 compose 默认值拦截
+                    if not os.getenv(key):
                         if isinstance(value, bool):
                             value = 'true' if value else 'false'
                         os.environ[key] = str(value)
