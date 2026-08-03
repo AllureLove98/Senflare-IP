@@ -522,10 +522,14 @@ def tcp_connect_test(ip: str, ports: list, timeout: float = 0.5) -> tuple:
                 s.settimeout(timeout)
                 start_time = time.time()
 
-                if s.connect_ex((ip, port)) == 0:
+                conn_result = s.connect_ex((ip, port))
+                if conn_result == 0:
                     delay = round((time.time() - start_time) * 1000)
                     min_delay = min(min_delay, delay)
                     success_count += 1
+                    logger.debug(f"✅ IP {ip} 端口 {port} 连接成功: {delay}ms")
+                else:
+                    logger.debug(f"IP {ip} 端口 {port} 连接失败（错误码 {conn_result}，{time.time() - start_time:.2f}s）")
         except (socket.timeout, socket.error, OSError) as e:
             logger.debug(f"IP {ip} 端口 {port} 连接失败: {str(e)[:30]}")
             continue
@@ -552,7 +556,12 @@ def quick_filter_ip(ip: str) -> tuple:
     Returns:
         tuple: (是否可用, 延迟毫秒数) - (bool, int)
     """
-    return tcp_connect_test(ip, CONFIG["quick_filter_ports"], timeout=0.5)
+    is_good, delay = tcp_connect_test(ip, CONFIG["quick_filter_ports"], timeout=0.5)
+    if is_good:
+        logger.debug(f"🔍 {ip} 快速筛选通过（延迟 {delay}ms）")
+    else:
+        logger.debug(f"🔍 {ip} 快速筛选失败（无可用端口）")
+    return (is_good, delay)
 
 def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
                            download_timeout: float = 5, sni: str = 'speed.cloudflare.com') -> tuple:
@@ -696,6 +705,11 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int) -> tuple:
                 best_speed = speed
                 if latency > 0:
                     best_latency = latency
+            # 每次尝试输出明细（速度/失败原因），用于 DEBUG 诊断
+            if speed > 0:
+                logger.debug(f"⚡ [{current}/{total}] {ip} 第{test_attempt + 1}/{test_count}次测速成功: {speed:.2f}Mbps，延迟 {latency:.0f}ms（{reason}）")
+            else:
+                logger.debug(f"⚡ [{current}/{total}] {ip} 第{test_attempt + 1}/{test_count}次测速失败: {reason}")
             # 速度很好，提前结束测试
             if speed > 100:
                 break
@@ -733,6 +747,7 @@ def test_bandwidth_concurrently(ips: list, max_workers: int | None = None) -> li
         max_workers = CONFIG["bandwidth_workers"]
 
     logger.info(f"⚡ 开始并发带宽测试 {len(ips)} 个IP，使用 {max_workers} 个线程")
+    logger.debug(f"⚡ 待测IP列表: {', '.join(ip for ip, _ in ips)}")
     bandwidth_results = []
     start_time = time.time()
 
@@ -1173,6 +1188,7 @@ def main() -> None:
             if CONFIG.get("use_proxy_for_collection", True) and PROXY_ENABLED:
                 logger.info("🔐 采集阶段使用代理")
             resp = collection_session.get(url, timeout=CONFIG["timeout"])  # 使用配置的超时时间
+            logger.debug(f"🔍 {url} 响应状态 {resp.status_code}，内容 {len(resp.text)} 字节")
             if resp.status_code == 200:
                 # 提取并验证IPv4地址
                 ips = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', resp.text)
@@ -1194,6 +1210,9 @@ def main() -> None:
                 all_ips.extend(valid_ips)
                 successful_sources += 1
                 logger.info(f"✅ 成功采集 {len(valid_ips)} 个有效IP地址")
+                if valid_ips:
+                    preview = ', '.join(valid_ips[:10]) + (' ...' if len(valid_ips) > 10 else '')
+                    logger.debug(f"🔍 {url} 提取到 {len(valid_ips)} 个IP: {preview}")
             elif resp.status_code == 403:
                 failed_sources += 1
                 logger.warning(f"⚠️ 被限制访问（状态码 403），跳过此源")
@@ -1236,6 +1255,8 @@ def main() -> None:
         for ip in filtered_ips:
             f.write(f"{ip}\n")
     logger.info(f"📄 已保存 {len(filtered_ips)} 个可用IP到 {FILE_BASIC_IP}")
+    preview = ', '.join(filtered_ips[:10]) + (' ...' if len(filtered_ips) > 10 else '')
+    logger.debug(f"📄 {FILE_BASIC_IP} 内容预览: {preview}")
     
     # 6. 立即进行地区识别与结果格式化（提前保存Senflare.txt）
     # 对快速筛选的IP进行地区识别，生成格式化结果
