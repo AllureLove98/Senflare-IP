@@ -1,0 +1,41 @@
+{
+  "// 说明": "Senflare-IP 配置文件模板。复制为 config.json 后按需修改，IPtest.py 会自动读取并覆盖内置默认配置。未包含的配置项使用内置默认值。",
+
+  "ip_sources": [
+    "https://cf.hyli.xyz/",
+    "https://ipdb.api.030101.xyz/?type=bestcf&country=true",
+    "https://api.urlce.com/cloudflare.html",
+    "https://addressesapi.090227.xyz/CloudFlareYes",
+    "https://cf.090227.xyz/CloudFlareYes",
+    "https://ipdb.api.030101.xyz/?type=bestcf;bestproxy&country=true",
+    "https://vps789.com/openApi/cfIpTop20",
+    "https://vps789.com/openApi/cfIpApi",
+    "https://www.wetest.vip/page/cloudflare/address_v4.html",
+    "https://www.wetest.vip/page/cloudflare/total_v4.html",
+    "https://cf.090227.xyz/cmcc?ips=50",
+    "https://cf.090227.xyz/ct?ips=50",
+    "https://cf.090227.xyz/cu?ips=50",
+    "https://ip.164746.xyz/ipTop10.html",
+    "https://raw.githubusercontent.com/HandsomeMJZ/cfip/refs/heads/main/full_ips.txt"
+  ],
+
+  "test_ports": [
+    443, 2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8443, 8444
+  ],
+  "timeout": 15,
+  "api_timeout": 5,
+  "query_interval": 0.5,
+
+  "max_workers": 15,
+  "batch_size": 30,
+  "cache_ttl_hours": 168,
+
+  "quick_filter_ports": [443],
+  "region_workers": 10,
+  "bandwidth_workers": 5,
+  "advanced_mode": true,
+  "bandwidth_test_count": 3,
+  "bandwidth_test_size_mb": 50,
+  "latency_filter_percentage": 40,
+  "use_proxy_for_collection": true
+}

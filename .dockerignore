@@ -1,0 +1,31 @@
+# ===== .dockerignore =====
+# 构建上下文排除项，减小镜像体积并避免泄露敏感信息
+
+# 版本控制
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.pyc
+
+# 运行产物（结果文件不应进入镜像）
+IPlist.txt
+Senflare.txt
+IPlist-Pro.txt
+Senflare-Pro.txt
+Ranking.txt
+Cache.json
+IPtest.log
+
+# 本地配置（config.json 由 Dockerfile 内置默认配置，构建时不读取用户本地配置）
+config.json
+
+# 本地环境变量（含代理凭据/GitHub token，严禁进入镜像）
+.env
+
+# 文档
+优化建议.md
+说明.md
+*.md

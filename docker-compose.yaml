@@ -1,5 +1,14 @@
 version: '3.9'
 
+# ===== Senflare-IP 开箱即用部署 =====
+# 镜像已内置 IPtest.py、entrypoint.sh 和默认 config.json，pull 后直接 up 即可运行。
+#
+# 自定义配置（二选一）：
+#   1. 修改本地 config.json 并取消下方 volumes 中 config 挂载的注释
+#   2. 通过环境变量 CONFIG_FILE 指定其他路径的配置文件
+#
+# 结果输出：取消 output 挂载注释后，运行结果（txt/json/log）会同步到宿主 ./output 目录
+
 services:
   senflare-ip:
     image: "allurelove98/senflare-ip:latest"
@@ -7,10 +16,17 @@ services:
     restart: unless-stopped
     working_dir: /app
     volumes:
-      - .:/app
+      # 可选：自定义配置（取消注释并使用本地 config.json 覆盖镜像默认配置）
+      # - ./config.json:/app/config.json:ro
+      # 可选：输出目录（运行结果同步到宿主机）
+      # - ./output:/app/output
 
     environment:
       TZ: Asia/Shanghai
+      # 可选：自定义配置文件路径（指向容器内路径）
+      # CONFIG_FILE: /app/config.json
+      # 运行间隔（秒），默认 10800（3小时）
+      RUN_INTERVAL_SECONDS: "${RUN_INTERVAL_SECONDS:-10800}"
       GIT_PUSH_ENABLED: "${GIT_PUSH_ENABLED:-false}"
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
       GITHUB_REPOSITORY: "${GITHUB_REPOSITORY:-}"

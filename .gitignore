@@ -1,1 +1,20 @@
-.env
+﻿.env
+IPtest.log
+__pycache__/
+*.pyc
+
+# 本地用户配置（不提交，避免泄露密钥/覆盖他人配置）
+config.json
+
+# 运行结果
+IPlist.txt
+Senflare.txt
+IPlist-Pro.txt
+Senflare-Pro.txt
+Ranking.txt
+Cache.json
+output/
+
+# 本地说明文档（不提交）
+优化建议.md
+说明.md

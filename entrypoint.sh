@@ -19,6 +19,12 @@ run_cycle() {
     fi
   done
 
+  # 若挂载了 /app/output 目录，则同步结果文件到宿主机（方便查看，不影响 git push）
+  if [ -d /app/output ]; then
+    echo "$LOG_PREFIX Syncing output files to /app/output"
+    cp -f IPlist.txt Senflare.txt IPlist-Pro.txt Senflare-Pro.txt Ranking.txt Cache.json IPtest.log /app/output/ 2>/dev/null || true
+  fi
+
   if [ "${GIT_PUSH_ENABLED:-false}" != "true" ]; then
     echo "$LOG_PREFIX Git push disabled; skipping upload"
     return 0
