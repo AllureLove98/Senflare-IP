@@ -46,8 +46,8 @@ Cloudflare优选IP采集器 v2.6.0
 • 智能缓存管理，支持TTL和大小限制
 
 作者：Senflare
-版本：v2.6.0
-更新：2026年8月3日
+版本：v2.8.0
+更新：2026年8月4日
 """
 
 # ===== 标准库导入 =====
@@ -68,6 +68,7 @@ import ipaddress
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
+import urllib.parse
 from collections import defaultdict
 
 # ===== 第三方库导入 =====
@@ -143,6 +144,9 @@ REQUIRED_CONFIG_KEYS = [
     'advanced_mode',
     'bandwidth_test_count',
     'bandwidth_test_size_mb',
+    'speed_test_url',
+    'rate_limit_pause_seconds',
+    'bandwidth_retry_rounds',
     'latency_filter_percentage',
     'use_proxy_for_collection',
 ]
@@ -811,13 +815,101 @@ def quick_filter_ip(ip: str) -> tuple:
         logger.debug(f"🔍 {ip} 快速筛选失败（无可用端口）")
     return (is_good, delay)
 
+# ===== 带宽测试 429 限流自动暂停 =====
+# 测速服务器（speed.cloudflare.com / httpbin.org 等）在请求过密时会返回 429 Too Many Requests。
+# 一旦检测到 429，全局暂停所有测速线程，等待 rate_limit_pause_seconds 秒后自动恢复，
+# 避免持续触发限流导致全部测速失败。
+_RATE_LIMIT_LOCK = threading.Lock()
+_RATE_LIMIT_PAUSE_UNTIL = 0.0  # 时间戳：此时间之前所有测速请求均暂停
+_RATE_LIMITED_IPS: set = set()  # 因 429 限流失败的 IP 集合（暂停结束后自动重试）
+
+
+def _rate_limit_pause() -> None:
+    """触发 429 全局暂停：所有测速线程暂停 rate_limit_pause_seconds 秒后自动恢复。"""
+    global _RATE_LIMIT_PAUSE_UNTIL
+    pause_seconds = float(CONFIG.get('rate_limit_pause_seconds', 60))
+    with _RATE_LIMIT_LOCK:
+        new_until = time.time() + pause_seconds
+        if new_until > _RATE_LIMIT_PAUSE_UNTIL:
+            _RATE_LIMIT_PAUSE_UNTIL = new_until
+            logger.warning(f"🚦 检测到测速服务器限流（429），测速自动暂停 {pause_seconds:.0f} 秒后恢复")
+        else:
+            logger.debug("🚦 429 暂停已生效，不重复延长")
+
+
+def _wait_while_rate_limited() -> None:
+    """等待 429 暂停结束（阻塞，暂停时间不占用单 IP 测速总超时）。"""
+    while True:
+        with _RATE_LIMIT_LOCK:
+            remaining = _RATE_LIMIT_PAUSE_UNTIL - time.time()
+        if remaining <= 0:
+            return
+        logger.debug(f"🚦 429 暂停中，剩余 {remaining:.0f} 秒后自动恢复...")
+        time.sleep(min(remaining, 5))
+
+
+def _get_speed_test_urls() -> list:
+    """获取配置的全部测速地址列表（支持字符串或数组，过滤空值）。"""
+    raw = CONFIG.get('speed_test_url', 'https://speed.cloudflare.com/__down?bytes={size}')
+    if isinstance(raw, str):
+        raw = [raw]
+    urls = [u.strip() for u in raw if isinstance(u, str) and u.strip()]
+    return urls or ['https://speed.cloudflare.com/__down?bytes={size}']
+
+
+def _download_speed_try_all(ip: str, size_bytes: int, connect_timeout: float = 3,
+                            download_timeout: float = 5) -> tuple:
+    """依次尝试配置的全部测速地址，返回 (速度Mbps, 延迟毫秒, 原因, 是否因429失败)。
+
+    按配置顺序逐个尝试：第一个成功下载的地址即被采用；全部失败返回最后原因。
+    任一地址返回 429 时标记 rate_limited=True，由并发层在暂停结束后自动重试该 IP。
+    """
+    urls = _get_speed_test_urls()
+    last_reason = ''
+    rate_limited = False
+    for url in urls:
+        try:
+            speed, latency, reason = _download_speed_direct(
+                ip, size_bytes, connect_timeout=connect_timeout,
+                download_timeout=download_timeout, speed_url=url)
+        except Exception as e:
+            speed, latency, reason = 0, 0, f"连接失败: {str(e)[:40]}"
+        if speed > 0:
+            return speed, latency, reason, False
+        last_reason = reason
+        if '429' in reason or '限流' in reason:
+            rate_limited = True
+        logger.debug(f"⚡ {ip} 测速地址 {url} 失败（{reason}），尝试下一个...")
+    return 0, 0, last_reason, rate_limited
+
+
+def _parse_speed_test_url(url: str, size_bytes: int) -> tuple:
+    """解析测速文件 URL 模板，返回 (scheme, host, port, path)。
+
+    URL 中的 {size} / {test_size_bytes} 占位符会被替换为实际下载字节数
+    （如 https://httpbin.org/bytes/{test_size_bytes}），也可配置不带占位符的
+    固定地址（如 https://cf.xiu2.xyz/url）。SNI 与 Host 头取自 URL 域名，
+    TCP 目标仍是被测 IP，从而测出该 IP 到本地的真实速度。
+    """
+    url = url.replace('{size}', str(int(size_bytes))).replace('{test_size_bytes}', str(int(size_bytes)))
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        raise ValueError(f"无效的测速 URL: {url}")
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    path = parsed.path or '/'
+    if parsed.query:
+        path += '?' + parsed.query
+    return parsed.scheme, parsed.hostname, port, path
+
+
 def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
-                           download_timeout: float = 5, sni: str = 'speed.cloudflare.com') -> tuple:
-    """HTTPS 直连 IP 测速（自定义 SNI 指向合法域名，绕过 Cloudflare 对 SNI=IP 的拒绝）
+                           download_timeout: float = 5,
+                           speed_url: str | None = None) -> tuple:
+    """单个测速地址的 HTTPS 直连下载（自定义 SNI 指向测速服务器域名，绕过 CDN 对 SNI=IP 的拒绝）
 
     为什么不用 requests：requests/urllib3 的 SNI 取自 URL 的 host，
     直连 https://{ip} 时 SNI=IP 字面量会被 Cloudflare 边缘拒绝（SSLV3_ALERT_HANDSHAKE_FAILURE）。
-    这里手写 socket+ssl，把 SNI 指向 speed.cloudflare.com（合法域名），
+    这里手写 socket+ssl，把 SNI 指向测速服务器域名（speed.cloudflare.com / httpbin.org 等），
     TCP 目标仍是被测 IP，从而真正测出该 IP 到本地的速度。
 
     Args:
@@ -825,28 +917,36 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
         size_bytes (int): 期望下载字节数
         connect_timeout (float): 连接超时（秒）
         download_timeout (float): 下载超时（秒）
-        sni (str): TLS SNI 与 Host 头指向的合法域名
+        speed_url (str | None): 本次尝试的测速 URL（None = 使用配置的第一个地址）
 
     Returns:
         tuple: (速度Mbps, 延迟毫秒, 失败原因字符串) - 失败时速度/延迟为 0，原因用于 debug 诊断
     """
     try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        sock = socket.create_connection((ip, 443), timeout=connect_timeout)
-        try:
-            ssock = ctx.wrap_socket(sock, server_hostname=sni)
-        except Exception as e:
+        if speed_url is None:
+            urls = _get_speed_test_urls()
+            speed_url = urls[0] if urls else 'https://speed.cloudflare.com/__down?bytes={size}'
+        scheme, host, port, path = _parse_speed_test_url(speed_url, size_bytes)
+
+        sock = socket.create_connection((ip, port), timeout=connect_timeout)
+        if scheme == 'https':
             try:
-                sock.close()
-            except Exception:
-                pass
-            return (0, 0, f"TLS握手失败: {str(e)[:40]}")
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                ssock = ctx.wrap_socket(sock, server_hostname=host)
+            except Exception as e:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                return (0, 0, f"TLS握手失败: {str(e)[:40]}")
+        else:
+            ssock = sock
 
         start_total = time.time()
-        req = (f"GET /__down?bytes={size_bytes} HTTP/1.1\r\n"
-               f"Host: {sni}\r\n"
+        req = (f"GET {path} HTTP/1.1\r\n"
+               f"Host: {host}\r\n"
                f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n"
                f"Connection: close\r\n"
                f"Accept: */*\r\n\r\n")
@@ -863,6 +963,17 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
                 break
         header, _, body = buf.partition(b'\r\n\r\n')
         status_line = header.split(b'\r\n')[0].decode(errors='replace')
+        # 429 限流检测：触发全局暂停，本次测速失败，后续请求等待暂停结束自动恢复
+        if b' 429 ' in header:
+            try:
+                ssock.close()
+            except Exception:
+                pass
+            _rate_limit_pause()
+            # 记录因 429 失败的 IP，暂停结束后由并发层自动重试
+            with _RATE_LIMIT_LOCK:
+                _RATE_LIMITED_IPS.add(ip)
+            return (0, 0, f"HTTP {status_line}（已触发限流暂停）")
         if b' 200 ' not in header:
             try:
                 ssock.close()
@@ -906,8 +1017,10 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int) -> tuple:
     通过HTTPS直连下载测试IP带宽性能
 
     使用真实的HTTPS下载测试来测量IP的带宽性能：
-    手写 socket+ssl 直连被测IP的443端口（SNI 指向 speed.cloudflare.com），
+    手写 socket+ssl 直连被测IP的端口（SNI 指向测速服务器域名），
+    依次尝试配置的全部测速地址（speed_test_url 列表），
     通过下载指定大小的文件来评估网络速度。
+    因 429 限流失败的 IP 会记录在案，暂停结束后由并发层自动重试。
 
     Args:
         ip (str): 要测试的IP地址
@@ -918,6 +1031,9 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int) -> tuple:
         tuple: (是否成功, 带宽Mbps, 延迟毫秒) - (bool, float, float)
     """
     try:
+        # 等待 429 限流暂停结束（暂停时间不占用单IP测速总超时）
+        _wait_while_rate_limited()
+
         # 验证IP格式
         if not is_valid_ipv4(ip):
             return (False, 0, 0)
@@ -945,10 +1061,13 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int) -> tuple:
                 logger.debug(f"⏱️ IP {ip} 带宽测试总超时（>{TOTAL_TIMEOUT}s），放弃")
                 break
 
-            speed, latency, reason = _download_speed_direct(
+            speed, latency, reason, was_rate_limited = _download_speed_try_all(
                 ip, test_size_bytes, connect_timeout=3, download_timeout=DOWNLOAD_TIMEOUT)
             if speed <= 0:
                 last_reason = reason
+                if was_rate_limited:
+                    # 429 限流失败由并发层在暂停结束后自动重试
+                    logger.debug(f"🚦 [{current}/{total}] {ip} 第{test_attempt + 1}/{test_count}次测速因 429 失败，等待暂停结束后自动重试")
             if speed > best_speed:
                 best_speed = speed
                 if latency > 0:
@@ -967,6 +1086,9 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int) -> tuple:
             logger.debug(f"⏱️ [{current}/{total}] {ip} 带宽测试超时，标记失败")
             return (False, 0, 0)
         if best_speed > 0:
+            # 测速成功：从 429 重试集合中移除（避免被重复重试）
+            with _RATE_LIMIT_LOCK:
+                _RATE_LIMITED_IPS.discard(ip)
             logger.debug(f"⚡ [{current}/{total}] {ip}（带宽综合速度：{best_speed:.2f}Mbps）")
             return (True, best_speed, best_latency)
         else:
@@ -998,34 +1120,62 @@ def test_bandwidth_concurrently(ips: list, max_workers: int | None = None) -> li
     logger.debug(f"⚡ 待测IP列表: {', '.join(ip for ip, _ in ips)}")
     bandwidth_results = []
     start_time = time.time()
+    ip_to_delay = {ip: delay for ip, delay in ips}
 
-    def worker(item: tuple, idx: int) -> tuple | None:
-        ip, delay = item
-        is_fast, bandwidth, latency = test_ip_bandwidth_only(ip, idx + 1, len(ips))
-        if is_fast:
-            # 使用TCP Ping测试的延迟数据
-            score = calculate_score(delay, delay, bandwidth, 100)
-            return (ip, delay, delay, bandwidth, latency, score)
-        return None
+    def _run_batch(batch_ips: list) -> list:
+        """并发测速一批IP，返回通过测速的结果列表。"""
+        results = []
+        batch_total = len(batch_ips)
 
-    try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_idx = {executor.submit(worker, item, idx): idx for idx, item in enumerate(ips)}
-            try:
-                # 批次级超时保护：单个IP最多耗时约15秒，这里给足余量避免误杀
-                for future in as_completed(future_to_idx, timeout=max(60, len(ips) * 20)):
-                    try:
-                        result = future.result()
-                        if result:
-                            bandwidth_results.append(result)
-                    except Exception as e:
-                        logger.error(f"⚡ 带宽测试异常: {str(e)[:50]}")
-            except TimeoutError:
-                logger.warning("⚠️ 带宽测试整体超过预期时间，跳过剩余任务")
-                for future in future_to_idx:
-                    future.cancel()
-    except Exception as e:
-        logger.error(f"⚡ 并发带宽测试执行出错: {str(e)[:50]}")
+        def worker(item: tuple, idx: int) -> tuple | None:
+            ip, delay = item
+            is_fast, bandwidth, latency = test_ip_bandwidth_only(ip, idx + 1, batch_total)
+            if is_fast:
+                # 使用TCP Ping测试的延迟数据
+                score = calculate_score(delay, delay, bandwidth, 100)
+                return (ip, delay, delay, bandwidth, latency, score)
+            return None
+
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_idx = {executor.submit(worker, item, idx): idx for idx, item in enumerate(batch_ips)}
+                try:
+                    # 批次级超时保护：单个IP最多耗时约15秒，这里给足余量避免误杀
+                    for future in as_completed(future_to_idx, timeout=max(60, len(batch_ips) * 20)):
+                        try:
+                            result = future.result()
+                            if result:
+                                results.append(result)
+                        except Exception as e:
+                            logger.error(f"⚡ 带宽测试异常: {str(e)[:50]}")
+                except TimeoutError:
+                    logger.warning("⚠️ 带宽测试整体超过预期时间，跳过剩余任务")
+                    for future in future_to_idx:
+                        future.cancel()
+        except Exception as e:
+            logger.error(f"⚡ 并发带宽测试执行出错: {str(e)[:50]}")
+        return results
+
+    # 第一轮：测试全部IP
+    bandwidth_results.extend(_run_batch(ips))
+
+    # 429 限流重试：把因 429 失败的 IP 在暂停结束后自动重新测速
+    retry_rounds = max(0, int(CONFIG.get('bandwidth_retry_rounds', 2)))
+    for retry_round in range(retry_rounds):
+        with _RATE_LIMIT_LOCK:
+            pending_ips = sorted(_RATE_LIMITED_IPS)
+        if not pending_ips:
+            break
+        _wait_while_rate_limited()  # 等待暂停结束再重试
+        with _RATE_LIMIT_LOCK:
+            # 等待期间可能有IP已通过其他尝试成功并移出集合，只重试仍被标记的
+            pending_ips = sorted(_RATE_LIMITED_IPS)
+            _RATE_LIMITED_IPS.clear()
+        if not pending_ips:
+            break
+        logger.info(f"🚦 429 限流暂停结束，第 {retry_round + 1}/{retry_rounds} 轮重试 {len(pending_ips)} 个IP")
+        retry_items = [(ip, ip_to_delay.get(ip, 0)) for ip in pending_ips]
+        bandwidth_results.extend(_run_batch(retry_items))
 
     total_time = time.time() - start_time
     failed = len(ips) - len(bandwidth_results)
