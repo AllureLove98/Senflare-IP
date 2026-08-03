@@ -847,13 +847,19 @@ def get_ip_region(ip: str) -> str:
         cached_data = region_cache[ip]
         if isinstance(cached_data, dict) and 'timestamp' in cached_data:
             if is_cache_valid(cached_data['timestamp'], CONFIG["cache_ttl_hours"]):
-                logger.info(f"📦 IP {ip} 地区信息从缓存获取: {cached_data['region']}")
-                return cached_data['region']
+                region = cached_data.get('region', '')
+                # 校验：国家代码应为 2~3 位大写字母（如 US、SGP）；
+                # 若存的是完整国家名（如 UNITED STATES），视为污染数据，跳过并重新查询
+                if region.isalpha() and 2 <= len(region) <= 3:
+                    logger.info(f"📦 IP {ip} 地区信息从缓存获取: {region}")
+                    return region
+                logger.warning(f"⚠️ IP {ip} 缓存地区数据异常({region!r})，重新查询")
         else:
             # 兼容旧格式缓存（旧格式直接存地区代码字符串）
-            if isinstance(cached_data, str):
+            if isinstance(cached_data, str) and 2 <= len(cached_data) <= 3 and cached_data.isalpha():
                 logger.info(f"📦 IP {ip} 地区信息从缓存获取（旧格式）: {cached_data}")
                 return cached_data
+            logger.warning(f"⚠️ IP {ip} 缓存地区数据异常({cached_data!r})，重新查询")
     
     # 尝试主要API（免费版本）
     logger.info(f"🌐 IP {ip} 开始API查询（主要API: ipinfo.io lite）...")
@@ -861,8 +867,9 @@ def get_ip_region(ip: str) -> str:
         resp = session.get(f'https://api.ipinfo.io/lite/{ip}?token=2cb674df499388', timeout=CONFIG["api_timeout"])
         if resp.status_code == 200:
             data = resp.json()
-            country_code = data.get('country', '').upper()  # ipinfo返回字段为country
-            if country_code:
+            # ipinfo lite 返回 country_code（如 US），country 是完整国家名（如 United States）
+            country_code = data.get('country_code', '').upper()
+            if country_code and 2 <= len(country_code) <= 3:
                 region_cache[ip] = {
                     'region': country_code,
                     'timestamp': datetime.now().isoformat()

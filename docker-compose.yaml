@@ -18,7 +18,7 @@ services:
     working_dir: /app
     volumes:
       # 可选：自定义配置（取消注释并使用本地 config.json 覆盖镜像默认配置）
-      # - ./config.json:/app/config.json:ro
+      # - ./config/config.json:/app/config.json:ro
       # 可选：输出目录（运行结果同步到宿主机）
       # - ./output:/app/output
 
