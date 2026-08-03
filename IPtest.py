@@ -179,7 +179,8 @@ def load_config() -> None:
     if isinstance(env_block, dict):
         applied = 0
         for key, value in env_block.items():
-            if value is None:
+            # 跳过注释键（config.example.json 中以 // 开头的键，如 "// LOG_LEVEL"）
+            if key.startswith('//') or value is None:
                 continue
             # 非空环境变量才优先（空串视为未设置），否则 env 区块永远被 compose 默认值拦截
             if not os.getenv(key):

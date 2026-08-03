@@ -13,7 +13,8 @@ try:
         cfg = json.load(f)
     env_block = cfg.get('env') or {}
     for key, value in env_block.items():
-        if value is None or os.environ.get(key):
+        # 跳过注释键（config.example.json 中以 // 开头的键，如 "// LOG_LEVEL"）
+        if key.startswith('//') or value is None or os.environ.get(key):
             continue
         if isinstance(value, bool):
             value = 'true' if value else 'false'
