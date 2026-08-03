@@ -76,14 +76,30 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 配置日志系统 - 同时输出到文件和控制台
 # 日志级别可用环境变量 LOG_LEVEL 控制（DEBUG/INFO/WARNING/ERROR），默认 INFO
-# 注意：该环境变量需在进程启动前注入（docker-compose environment 或 .env），
-#       config.json env 区块的 LOG_LEVEL 不生效（写入时机晚于本配置）
+# 支持两种设置方式（优先级从高到低）：
+#   1. 进程启动前注入：docker-compose environment / .env / shell export
+#   2. config.json 的 env 区块：写入 LOG_LEVEL 键即可（load_config 后会自动重新应用）
 _LOG_LEVELS = {
     'DEBUG': logging.DEBUG,
     'INFO': logging.INFO,
     'WARNING': logging.WARNING,
     'ERROR': logging.ERROR,
 }
+
+
+def _apply_log_level() -> None:
+    """根据环境变量 LOG_LEVEL 重新设置日志级别。
+
+    本函数可重复调用：load_config() 读取 config.json 的 env 区块后，
+    再次调用即可让配置文件中设置的 LOG_LEVEL 生效。
+    """
+    level = _LOG_LEVELS.get(os.getenv('LOG_LEVEL', 'INFO').upper(), logging.INFO)
+    logging.getLogger().setLevel(level)  # 根 logger 级别（控制台/文件 handler 均受其约束）
+    if 'logger' in globals():
+        logger.setLevel(level)  # 模块 logger 显式同步，避免 NOTSET 继承歧义
+    return level
+
+
 logging.basicConfig(
     level=_LOG_LEVELS.get(os.getenv('LOG_LEVEL', 'INFO').upper(), logging.INFO),
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -189,6 +205,8 @@ def load_config() -> None:
                         applied += 1
                 if applied:
                     logger.info(f"⚙️ 已从配置文件 env 区块设置 {applied} 个环境变量")
+                # env 区块可能包含 LOG_LEVEL，重新应用日志级别使其生效
+                _apply_log_level()
                 # 若配置了代理，同步更新代理相关全局变量
                 proxy = (os.getenv('HTTP_PROXY') or os.getenv('HTTPS_PROXY')
                          or os.getenv('ALL_PROXY') or '')
@@ -627,7 +645,7 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int, sess: requests.Ses
 
                             # 速度很好，提前返回
                             if speed_mbps > 100:
-                                logger.debug(f"⚡ [{current}/{total}] {ip}（带宽综合速度：{best_speed:.2f}Mbps）")
+                                logger.info(f"⚡ [{current}/{total}] {ip}（带宽综合速度：{best_speed:.2f}Mbps）")
                                 return (True, best_speed, best_latency)
                 except Exception as e:
                     logger.debug(f"IP {ip} 带宽测试请求异常: {str(e)[:50]}")
@@ -638,10 +656,10 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int, sess: requests.Ses
             logger.debug(f"⏱️ [{current}/{total}] {ip} 带宽测试超时，标记失败")
             return (False, 0, 0)
         if best_speed > 0:
-            logger.debug(f"⚡ [{current}/{total}] {ip}（带宽综合速度：{best_speed:.2f}Mbps）")
+            logger.info(f"⚡ [{current}/{total}] {ip}（带宽综合速度：{best_speed:.2f}Mbps）")
             return (True, best_speed, best_latency)
         else:
-            logger.debug(f"⚡ [{current}/{total}] {ip}（带宽测试失败）")
+            logger.info(f"⚡ [{current}/{total}] {ip}（带宽测试失败）")
             return (False, 0, 0)
     except Exception as e:
         logger.error(f"IP {ip} 带宽测试异常: {str(e)[:50]}")
@@ -835,8 +853,8 @@ def quick_filter_ips_concurrently(ips: list, max_workers: int | None = None) -> 
                 except Exception as e:
                     logger.error(f"❌ 快速筛选异常 {ip}: {str(e)[:30]}")
 
-        # 每个批次输出一条汇总进度，避免逐IP日志刷屏
-        logger.debug(f"🔍 批次 {batch_num}/{total_batches} 完成，当前累计可用 {len(filtered_results)} 个IP")
+        # 每个批次输出一条 INFO 汇总进度（逐IP明细为debug，避免刷屏）
+        logger.info(f"🔍 批次 {batch_num}/{total_batches} 完成，累计可用 {len(filtered_results)} 个IP")
 
         if i + batch_size < len(ips):
             time.sleep(0.05)
@@ -1004,6 +1022,9 @@ def test_ips_concurrently(ips: list, max_workers: int | None = None) -> list:
                 for future in future_to_ip:
                     future.cancel()
         
+        # 每个批次输出一条 INFO 进度，避免长时间无反馈（逐IP明细为debug）
+        logger.info(f"📡 批次 {batch_num}/{total_batches} 完成，累计可用 {len(available_ips)} 个IP")
+        
         # 批次间短暂休息，避免过度占用资源
         if i + batch_size < len(ips):
             time.sleep(0.2)  # 减少休息时间
@@ -1038,14 +1059,19 @@ def get_regions_concurrently(ips: list, max_workers: int | None = None) -> list:
         future_to_key = {executor.submit(get_ip_region, ip): (ip, min_delay, avg_delay) for ip, min_delay, avg_delay in ips}
 
         # 通过 as_completed 直接消费结果，O(n) 复杂度
+        completed = 0
         for future in as_completed(future_to_key):
             ip, min_delay, avg_delay = future_to_key[future]
+            completed += 1
             try:
                 region_code = future.result()
                 results.append((ip, region_code, min_delay, avg_delay))
             except Exception as e:
                 logger.warning(f"地区识别失败 {ip}: {str(e)[:50]}")
                 results.append((ip, 'Unknown', min_delay, avg_delay))
+            # 每完成 50 个输出一条 INFO 进度，避免长时间无反馈（逐IP明细为debug）
+            if completed % 50 == 0 or completed == len(ips):
+                logger.info(f"🌍 地区识别进度: {completed}/{len(ips)}")
 
     # 按原顺序输出（保持日志可读性）
     order = {tup: idx for idx, tup in enumerate(ips)}
