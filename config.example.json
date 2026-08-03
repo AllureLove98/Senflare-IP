@@ -1,5 +1,5 @@
 {
-  "// 说明": "Senflare-IP 配置文件模板（唯一配置来源）。复制为 config.json 后按需修改，并挂载到容器 /app/config.json。本程序不内置任何默认值：以下 16 个配置项 + env 区块全部必填，缺失任一都会启动报错。所有以 // 开头的键都是注释，程序会自动忽略，可放心保留。",
+  "// 说明": "Senflare-IP 配置文件模板（唯一配置来源）。复制为 config.json 后按需修改，并挂载到容器 /app/config.json。本程序不内置任何默认值：以下 18 个配置项 + env 区块全部必填，缺失任一都会启动报错。所有以 // 开头的键都是注释，程序会自动忽略，可放心保留。",
 
   "// env 区块说明": "运行参数与机密信息，等价于环境变量，会被写入容器环境变量。优先级：已设置的容器环境变量 > 此处配置（即 compose 里写死的环境变量优先，此处用于兜底）。GITHUB_TOKEN 等敏感信息建议用 compose environment 或 .env 注入，避免提交到仓库。",
   "env": {
@@ -147,17 +147,6 @@
 
   "// bandwidth_test_size_mb": "带宽测试下载文件大小（MB），默认 50。越大测速越准但耗时越长；下载超时 5 秒，超时按已下载量折算速度。",
   "bandwidth_test_size_mb": 50,
-
-  "// speed_test_url": "带宽测试下载文件 URL 列表（数组或单个字符串均可）。按顺序依次尝试每个地址：第一个能成功下载的即被采用，全部失败才判定该IP测速失败（一个地址 404/超时/被墙会自动换下一个）。支持占位符 {size} 或 {test_size_bytes}（替换为实际下载字节数），也支持不带占位符的固定地址。程序自动跟随 301/302 重定向（最多 3 跳）；小于目标大小 20% 的小文件判定为不可信自动跳过，避免速度虚高。列表已清理失效地址（w.7rs.net、openbsd 7.3 已 404，down2.178965.xyz 超时；parallels 不在 CF 边缘，直连大概率 404，仅作最后兜底）。固定大文件地址仅需下载目标字节数即断开。SNI/Host 取自 URL 域名，TCP 仍直连被测 IP。",
-  "speed_test_url": [
-    "https://speed.cloudflare.com/__down?bytes={size}",
-    "https://cf.xiu2.xyz/url",
-    "https://speedtest.poorhub.pro/cf.7z",
-    "https://t1.geigei.gq",
-    "https://xn--e1a.eu.org/300.zip",
-    "https://cfspeed.520131420.xyz/200mb.bin",
-    "https://download.parallels.com/desktop/v15/15.1.5-47309/ParallelsDesktop-15.1.5-47309.dmg"
-  ],
 
   "// rate_limit_pause_seconds": "带宽测试遇到 HTTP 429（服务器限流）时自动暂停的秒数，默认 60。暂停期间所有测速线程等待，结束后自动恢复，避免持续触发限流。",
   "rate_limit_pause_seconds": 60,

@@ -1,5 +1,5 @@
 """
-Cloudflare优选IP采集器 v2.6.0
+Cloudflare优选IP采集器 v2.8.2
 ===============================================
 
 一个高效、智能的Cloudflare优选IP采集和检测工具，专为网络优化而设计。
@@ -46,7 +46,7 @@ Cloudflare优选IP采集器 v2.6.0
 • 智能缓存管理，支持TTL和大小限制
 
 作者：Senflare
-版本：v2.8.1
+版本：v2.8.2
 更新：2026年8月4日
 """
 
@@ -144,7 +144,6 @@ REQUIRED_CONFIG_KEYS = [
     'advanced_mode',
     'bandwidth_test_count',
     'bandwidth_test_size_mb',
-    'speed_test_url',
     'rate_limit_pause_seconds',
     'bandwidth_retry_rounds',
     'latency_filter_percentage',
@@ -823,6 +822,11 @@ _RATE_LIMIT_LOCK = threading.Lock()
 _RATE_LIMIT_PAUSE_UNTIL = 0.0  # 时间戳：此时间之前所有测速请求均暂停
 _RATE_LIMITED_IPS: set = set()  # 因 429 限流失败的 IP 集合（暂停结束后自动重试）
 
+# 带宽测速下载地址（写死，不再从配置读取 speed_test_url 数组）
+# 直连被测 IP 的 443 端口，SNI/Host 指向此域名，真正测出该 IP 到本地的速度。
+# 注意：speed.cloudflare.com 对高并发/机房 IP 可能返回 403/429，如需更换直接改这里。
+SPEED_TEST_URL = 'https://speed.cloudflare.com/__down?bytes={size}'
+
 
 def _rate_limit_pause() -> None:
     """触发 429 全局暂停：所有测速线程暂停 rate_limit_pause_seconds 秒后自动恢复。"""
@@ -848,39 +852,21 @@ def _wait_while_rate_limited() -> None:
         time.sleep(min(remaining, 5))
 
 
-def _get_speed_test_urls() -> list:
-    """获取配置的全部测速地址列表（支持字符串或数组，过滤空值）。"""
-    raw = CONFIG.get('speed_test_url', 'https://speed.cloudflare.com/__down?bytes={size}')
-    if isinstance(raw, str):
-        raw = [raw]
-    urls = [u.strip() for u in raw if isinstance(u, str) and u.strip()]
-    return urls or ['https://speed.cloudflare.com/__down?bytes={size}']
-
-
 def _download_speed_try_all(ip: str, size_bytes: int, connect_timeout: float = 3,
                             download_timeout: float = 5) -> tuple:
-    """依次尝试配置的全部测速地址，返回 (速度Mbps, 延迟毫秒, 原因, 是否因429失败)。
+    """单地址测速（写死 SPEED_TEST_URL），返回 (速度Mbps, 延迟毫秒, 原因, 是否因429失败)。
 
-    按配置顺序逐个尝试：第一个成功下载的地址即被采用；全部失败返回最后原因。
-    任一地址返回 429 时标记 rate_limited=True，由并发层在暂停结束后自动重试该 IP。
+    测速地址已写死，不再按数组切换：地址 403/被墙时该 IP 直接测速失败。
+    429 时标记 rate_limited=True，由并发层在暂停结束后自动重试该 IP。
     """
-    urls = _get_speed_test_urls()
-    last_reason = ''
-    rate_limited = False
-    for url in urls:
-        try:
-            speed, latency, reason = _download_speed_direct(
-                ip, size_bytes, connect_timeout=connect_timeout,
-                download_timeout=download_timeout, speed_url=url)
-        except Exception as e:
-            speed, latency, reason = 0, 0, f"连接失败: {str(e)[:40]}"
-        if speed > 0:
-            return speed, latency, reason, False
-        last_reason = reason
-        if '429' in reason or '限流' in reason:
-            rate_limited = True
-        logger.debug(f"⚡ {ip} 测速地址 {url} 失败（{reason}），尝试下一个...")
-    return 0, 0, last_reason, rate_limited
+    try:
+        speed, latency, reason = _download_speed_direct(
+            ip, size_bytes, connect_timeout=connect_timeout,
+            download_timeout=download_timeout)
+    except Exception as e:
+        speed, latency, reason = 0, 0, f"连接失败: {str(e)[:40]}"
+    rate_limited = '429' in reason or '限流' in reason
+    return speed, latency, reason, rate_limited
 
 
 def _parse_speed_test_url(url: str, size_bytes: int) -> tuple:
@@ -903,37 +889,29 @@ def _parse_speed_test_url(url: str, size_bytes: int) -> tuple:
 
 
 def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
-                           download_timeout: float = 5,
-                           speed_url: str | None = None,
-                           redirect_depth: int = 0) -> tuple:
-    """单个测速地址的 HTTPS 直连下载（自定义 SNI 指向测速服务器域名，绕过 CDN 对 SNI=IP 的拒绝）
+                           download_timeout: float = 5) -> tuple:
+    """写死测速地址的 HTTPS 直连下载（自定义 SNI 指向测速服务器域名，绕过 CDN 对 SNI=IP 的拒绝）
 
     为什么不用 requests：requests/urllib3 的 SNI 取自 URL 的 host，
     直连 https://{ip} 时 SNI=IP 字面量会被 Cloudflare 边缘拒绝（SSLV3_ALERT_HANDSHAKE_FAILURE）。
-    这里手写 socket+ssl，把 SNI 指向测速服务器域名（speed.cloudflare.com / cf.xiu2.xyz 等），
+    这里手写 socket+ssl，把 SNI 指向 SPEED_TEST_URL 的域名（speed.cloudflare.com），
     TCP 目标仍是被测 IP，从而真正测出该 IP 到本地的速度。
 
-    支持 301/302/303/307/308 重定向跟随（最多 3 跳）：解析响应头的 Location 后按新地址
-    重新直连，SNI/Host 用新域名，TCP 仍直连被测 IP。
-    小文件防护：响应头 Content-Length 或实际下载量小于目标大小 20% 时，判定结果不可信
-    （小文件秒下完会导致速度虚高），直接判失败由调用方尝试下一个地址。
+    测速地址写死（SPEED_TEST_URL）：不再读取配置 speed_test_url 数组，没有多地址自动切换
+    （地址 403/被墙时该 IP 测速失败）。保留 429 限流检测：触发全局暂停，由并发层在
+    暂停结束后自动重试该 IP。
 
     Args:
         ip (str): 被测 IP
         size_bytes (int): 期望下载字节数
         connect_timeout (float): 连接超时（秒）
         download_timeout (float): 下载超时（秒）
-        speed_url (str | None): 本次尝试的测速 URL（None = 使用配置的第一个地址）
-        redirect_depth (int): 已跟随的重定向次数（内部递归使用）
 
     Returns:
         tuple: (速度Mbps, 延迟毫秒, 失败原因字符串) - 失败时速度/延迟为 0，原因用于 debug 诊断
     """
     try:
-        if speed_url is None:
-            urls = _get_speed_test_urls()
-            speed_url = urls[0] if urls else 'https://speed.cloudflare.com/__down?bytes={size}'
-        scheme, host, port, path = _parse_speed_test_url(speed_url, size_bytes)
+        scheme, host, port, path = _parse_speed_test_url(SPEED_TEST_URL, size_bytes)
 
         sock = socket.create_connection((ip, port), timeout=connect_timeout)
         if scheme == 'https':
@@ -970,30 +948,6 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
                 break
         header, _, body = buf.partition(b'\r\n\r\n')
         status_line = header.split(b'\r\n')[0].decode(errors='replace')
-        # 301/302/303/307/308 重定向跟随（最多 3 跳）：解析 Location 后按新地址重试，TCP 仍直连被测 IP
-        try:
-            status_code = int(header.split(b'\r\n')[0].split(b' ')[1])
-        except (IndexError, ValueError):
-            status_code = 0
-        if status_code in (301, 302, 303, 307, 308):
-            try:
-                ssock.close()
-            except Exception:
-                pass
-            if redirect_depth >= 3:
-                return (0, 0, f"HTTP {status_code} 重定向超过3跳")
-            location = ''
-            for _line in header.split(b'\r\n'):
-                if _line.lower().startswith(b'location:'):
-                    location = _line.split(b':', 1)[1].strip().decode(errors='replace')
-                    break
-            if not location:
-                return (0, 0, f"HTTP {status_code} 无 Location 头")
-            new_url = urllib.parse.urljoin(speed_url, location)
-            logger.debug(f"↪️ {ip} 测速地址 {status_code} 重定向到 {new_url}")
-            return _download_speed_direct(ip, size_bytes, connect_timeout=connect_timeout,
-                                          download_timeout=download_timeout, speed_url=new_url,
-                                          redirect_depth=redirect_depth + 1)
         # 429 限流检测：触发全局暂停，本次测速失败，后续请求等待暂停结束自动恢复
         if b' 429 ' in header:
             try:
@@ -1012,23 +966,6 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
                 pass
             return (0, 0, f"HTTP {status_line}")
 
-        # 小文件防护：Content-Length 小于目标 20% 直接判失败，避免小文件秒下完导致速度虚高
-        min_valid_bytes = size_bytes * 0.2
-        content_length = None
-        for _line in header.split(b'\r\n'):
-            if _line.lower().startswith(b'content-length:'):
-                try:
-                    content_length = int(_line.split(b':', 1)[1].strip())
-                except ValueError:
-                    pass
-                break
-        if content_length is not None and 0 < content_length < min_valid_bytes:
-            try:
-                ssock.close()
-            except Exception:
-                pass
-            return (0, 0, f"文件过小({content_length / 1024 / 1024:.1f}MB < 目标的20%)")
-
         # 首次字节耗时近似连接延迟
         latency = (time.time() - start_total) * 1000
 
@@ -1036,7 +973,6 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
         ssock.settimeout(download_timeout)
         start_download = time.time()
         total = len(body)
-        eof_early = False  # 文件读完（EOF）提前结束——文件实际小于目标大小时发生
         while total < size_bytes:
             if time.time() - start_download > download_timeout:
                 break
@@ -1045,7 +981,6 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
             except socket.timeout:
                 break
             if not chunk:
-                eof_early = True
                 break
             total += len(chunk)
         dur = time.time() - start_download
@@ -1053,10 +988,6 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
             ssock.close()
         except Exception:
             pass
-
-        # EOF 提前结束且下载量远小于目标：文件过小，速度虚高不可信
-        if eof_early and total < min_valid_bytes:
-            return (0, 0, f"文件过小(仅{total / 1024 / 1024:.2f}MB < 目标的20%)")
 
         if dur > 0.05 and total > 0:
             mbps = (total * 8) / (dur * 1000000)
@@ -1071,8 +1002,7 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int) -> tuple:
     通过HTTPS直连下载测试IP带宽性能
 
     使用真实的HTTPS下载测试来测量IP的带宽性能：
-    手写 socket+ssl 直连被测IP的端口（SNI 指向测速服务器域名），
-    依次尝试配置的全部测速地址（speed_test_url 列表），
+    手写 socket+ssl 直连被测IP的端口（SNI 指向写死的测速服务器域名 SPEED_TEST_URL），
     通过下载指定大小的文件来评估网络速度。
     因 429 限流失败的 IP 会记录在案，暂停结束后由并发层自动重试。
 
