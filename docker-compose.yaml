@@ -27,6 +27,8 @@ services:
       # 可选：自定义配置文件路径（指向容器内路径）
       # CONFIG_FILE: /app/config.json
       # 运行参数也可写在 config.json 的 env 区块（env 方式二选一，环境变量优先）
+      # 日志级别：DEBUG=显示全部逐IP明细，INFO=只显示汇总（默认），WARNING/ERROR=仅错误
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       # 运行间隔（秒），默认 10800（3小时）
       RUN_INTERVAL_SECONDS: "${RUN_INTERVAL_SECONDS:-10800}"
       GIT_PUSH_ENABLED: "${GIT_PUSH_ENABLED:-false}"

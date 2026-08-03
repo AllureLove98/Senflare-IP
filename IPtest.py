@@ -75,8 +75,17 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 
 # 配置日志系统 - 同时输出到文件和控制台
+# 日志级别可用环境变量 LOG_LEVEL 控制（DEBUG/INFO/WARNING/ERROR），默认 INFO
+# 注意：该环境变量需在进程启动前注入（docker-compose environment 或 .env），
+#       config.json env 区块的 LOG_LEVEL 不生效（写入时机晚于本配置）
+_LOG_LEVELS = {
+    'DEBUG': logging.DEBUG,
+    'INFO': logging.INFO,
+    'WARNING': logging.WARNING,
+    'ERROR': logging.ERROR,
+}
 logging.basicConfig(
-    level=logging.INFO,
+    level=_LOG_LEVELS.get(os.getenv('LOG_LEVEL', 'INFO').upper(), logging.INFO),
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('IPtest.log', encoding='utf-8'),  # 文件日志
