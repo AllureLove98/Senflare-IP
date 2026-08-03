@@ -46,7 +46,7 @@ Cloudflare优选IP采集器 v2.6.0
 • 智能缓存管理，支持TTL和大小限制
 
 作者：Senflare
-版本：v2.8.0
+版本：v2.8.1
 更新：2026年8月4日
 """
 
@@ -904,13 +904,19 @@ def _parse_speed_test_url(url: str, size_bytes: int) -> tuple:
 
 def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
                            download_timeout: float = 5,
-                           speed_url: str | None = None) -> tuple:
+                           speed_url: str | None = None,
+                           redirect_depth: int = 0) -> tuple:
     """单个测速地址的 HTTPS 直连下载（自定义 SNI 指向测速服务器域名，绕过 CDN 对 SNI=IP 的拒绝）
 
     为什么不用 requests：requests/urllib3 的 SNI 取自 URL 的 host，
     直连 https://{ip} 时 SNI=IP 字面量会被 Cloudflare 边缘拒绝（SSLV3_ALERT_HANDSHAKE_FAILURE）。
-    这里手写 socket+ssl，把 SNI 指向测速服务器域名（speed.cloudflare.com / httpbin.org 等），
+    这里手写 socket+ssl，把 SNI 指向测速服务器域名（speed.cloudflare.com / cf.xiu2.xyz 等），
     TCP 目标仍是被测 IP，从而真正测出该 IP 到本地的速度。
+
+    支持 301/302/303/307/308 重定向跟随（最多 3 跳）：解析响应头的 Location 后按新地址
+    重新直连，SNI/Host 用新域名，TCP 仍直连被测 IP。
+    小文件防护：响应头 Content-Length 或实际下载量小于目标大小 20% 时，判定结果不可信
+    （小文件秒下完会导致速度虚高），直接判失败由调用方尝试下一个地址。
 
     Args:
         ip (str): 被测 IP
@@ -918,6 +924,7 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
         connect_timeout (float): 连接超时（秒）
         download_timeout (float): 下载超时（秒）
         speed_url (str | None): 本次尝试的测速 URL（None = 使用配置的第一个地址）
+        redirect_depth (int): 已跟随的重定向次数（内部递归使用）
 
     Returns:
         tuple: (速度Mbps, 延迟毫秒, 失败原因字符串) - 失败时速度/延迟为 0，原因用于 debug 诊断
@@ -963,6 +970,30 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
                 break
         header, _, body = buf.partition(b'\r\n\r\n')
         status_line = header.split(b'\r\n')[0].decode(errors='replace')
+        # 301/302/303/307/308 重定向跟随（最多 3 跳）：解析 Location 后按新地址重试，TCP 仍直连被测 IP
+        try:
+            status_code = int(header.split(b'\r\n')[0].split(b' ')[1])
+        except (IndexError, ValueError):
+            status_code = 0
+        if status_code in (301, 302, 303, 307, 308):
+            try:
+                ssock.close()
+            except Exception:
+                pass
+            if redirect_depth >= 3:
+                return (0, 0, f"HTTP {status_code} 重定向超过3跳")
+            location = ''
+            for _line in header.split(b'\r\n'):
+                if _line.lower().startswith(b'location:'):
+                    location = _line.split(b':', 1)[1].strip().decode(errors='replace')
+                    break
+            if not location:
+                return (0, 0, f"HTTP {status_code} 无 Location 头")
+            new_url = urllib.parse.urljoin(speed_url, location)
+            logger.debug(f"↪️ {ip} 测速地址 {status_code} 重定向到 {new_url}")
+            return _download_speed_direct(ip, size_bytes, connect_timeout=connect_timeout,
+                                          download_timeout=download_timeout, speed_url=new_url,
+                                          redirect_depth=redirect_depth + 1)
         # 429 限流检测：触发全局暂停，本次测速失败，后续请求等待暂停结束自动恢复
         if b' 429 ' in header:
             try:
@@ -981,6 +1012,23 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
                 pass
             return (0, 0, f"HTTP {status_line}")
 
+        # 小文件防护：Content-Length 小于目标 20% 直接判失败，避免小文件秒下完导致速度虚高
+        min_valid_bytes = size_bytes * 0.2
+        content_length = None
+        for _line in header.split(b'\r\n'):
+            if _line.lower().startswith(b'content-length:'):
+                try:
+                    content_length = int(_line.split(b':', 1)[1].strip())
+                except ValueError:
+                    pass
+                break
+        if content_length is not None and 0 < content_length < min_valid_bytes:
+            try:
+                ssock.close()
+            except Exception:
+                pass
+            return (0, 0, f"文件过小({content_length / 1024 / 1024:.1f}MB < 目标的20%)")
+
         # 首次字节耗时近似连接延迟
         latency = (time.time() - start_total) * 1000
 
@@ -988,6 +1036,7 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
         ssock.settimeout(download_timeout)
         start_download = time.time()
         total = len(body)
+        eof_early = False  # 文件读完（EOF）提前结束——文件实际小于目标大小时发生
         while total < size_bytes:
             if time.time() - start_download > download_timeout:
                 break
@@ -996,6 +1045,7 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
             except socket.timeout:
                 break
             if not chunk:
+                eof_early = True
                 break
             total += len(chunk)
         dur = time.time() - start_download
@@ -1003,6 +1053,10 @@ def _download_speed_direct(ip: str, size_bytes: int, connect_timeout: float = 3,
             ssock.close()
         except Exception:
             pass
+
+        # EOF 提前结束且下载量远小于目标：文件过小，速度虚高不可信
+        if eof_early and total < min_valid_bytes:
+            return (0, 0, f"文件过小(仅{total / 1024 / 1024:.2f}MB < 目标的20%)")
 
         if dur > 0.05 and total > 0:
             mbps = (total * 8) / (dur * 1000000)
