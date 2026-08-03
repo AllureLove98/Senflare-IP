@@ -1,5 +1,5 @@
 """
-Cloudflare优选IP采集器 v2.5.0
+Cloudflare优选IP采集器 v2.6.0
 ===============================================
 
 一个高效、智能的Cloudflare优选IP采集和检测工具，专为网络优化而设计。
@@ -8,6 +8,7 @@ Cloudflare优选IP采集器 v2.5.0
 -----------
 • IP采集：多API源并发采集，获取大量候选IP地址
 • IP段扫描：从CIDR网段源（如Cloudflare官方ips-v4）随机采样IP，发现公开列表外的优选IP（可用开关控制）
+• 地区定向扫描：按国家/地区筛选Cloudflare优选IP，确保每个目标地区凑够指定数量的有效节点（参考 CloudflareSpeedTest 的IP段扫描+测速思路）
 • 智能筛选：TCP连接测试快速剔除不可用IP
 • 性能测试：TCP Ping延迟测试 + HTTP带宽测试
 • 地区识别：自动识别IP地理位置，支持缓存机制
@@ -32,6 +33,8 @@ Cloudflare优选IP采集器 v2.5.0
 • IPlist-Pro.txt - 高级版IP列表（性能测试结果）
 • Senflare-Pro.txt - 高级版格式化IP列表（按地区分组，含测速 Mbps，速度快的排前面）
 • Ranking.txt - 详细排名信息（延迟、带宽、评分）
+• Region-All.txt - 地区定向扫描汇总（格式化，含测速Mbps，速度快的排前面）
+• Region-{CODE}.txt - 单个地区的纯IP列表（如 Region-HK.txt）
 • Cache.json - 地区信息缓存文件
 • IPtest.log - 详细运行日志
 
@@ -43,7 +46,7 @@ Cloudflare优选IP采集器 v2.5.0
 • 智能缓存管理，支持TTL和大小限制
 
 作者：Senflare
-版本：v2.5.0
+版本：v2.6.0
 更新：2026年8月3日
 """
 
@@ -64,6 +67,7 @@ import random
 import ipaddress
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import glob
 from collections import defaultdict
 
 # ===== 第三方库导入 =====
@@ -276,6 +280,8 @@ FILE_PRO_IP = 'IPlist-Pro.txt'          # 高级版IP列表
 FILE_PRO_REGION = 'Senflare-Pro.txt'    # 高级版格式化IP列表（按地区分组）
 FILE_RANKING = 'Ranking.txt'            # 详细排名信息
 FILE_CACHE = 'Cache.json'               # 地区信息缓存
+FILE_REGION_ALL = 'Region-All.txt'      # 地区定向扫描汇总（格式化，含测速Mbps）
+FILE_REGION_PREFIX = 'Region-'          # 地区定向扫描单地区文件前缀（如 Region-HK.txt 纯IP）
 
 # ===== 全局变量 =====
 # 地区信息缓存，用于存储IP地理位置查询结果
@@ -500,12 +506,12 @@ def collect_cidr_ips(cidr_sources: list, per_segment: int = 10) -> list:
 
     Args:
         cidr_sources (list): 段源 URL 列表
-        per_segment (int): 每个网段采样的IP数量（自动限制在 1-50）
+        per_segment (int): 每个网段采样的IP数量（自动限制在 1-200）
 
     Returns:
         list: 采样出的IP字符串列表
     """
-    per_segment = max(1, min(int(per_segment), 50))
+    per_segment = max(1, min(int(per_segment), 200))
     sampled_ips = []
     successful = 0
     failed = 0
@@ -550,6 +556,163 @@ def collect_cidr_ips(cidr_sources: list, per_segment: int = 10) -> list:
 
     logger.info(f"📊 段源采集统计: 成功 {successful} 个源，失败 {failed} 个源，共解析 {total_cidrs} 个网段")
     return sampled_ips
+
+# ===== 地区定向扫描模块 =====
+# 参考 CloudflareSpeedTest 的 IP段扫描+测速筛选思路，按国家/地区维度筛选：
+# 从IP段源采样 → 快速筛选 → 地区识别 → 补采凑够候选 → 深度测试 → 有效定义筛选
+
+def scan_region_targets(region_targets: list, target_count: int = 10,
+                        valid_max_delay: float = 300, valid_min_bandwidth: float = 5,
+                        per_segment: int = 50, max_rounds: int = 3,
+                        existing_ips: list | None = None) -> dict:
+    """
+    地区定向扫描：为每个目标地区凑够 target_count 个有效节点
+
+    有效节点定义（可配置）：延迟 < valid_max_delay ms 且 带宽 > valid_min_bandwidth Mbps。
+    候选数量 = target_count * 3（深度测试淘汰余量），不足则自动补采，保证输出的是
+    测速后仍达标的有效节点，而不是"筛出来一堆最后只剩1个"。
+
+    Args:
+        region_targets (list): 目标地区代码列表，如 ["HK","JP","US"]
+        target_count (int): 每个地区需要的有效节点数
+        valid_max_delay (float): 有效节点延迟上限（毫秒）
+        valid_min_bandwidth (float): 有效节点带宽下限（Mbps）
+        per_segment (int): 补采时每个网段采样数
+        max_rounds (int): 最大补采轮数
+        existing_ips (list | None): 主流程已快速筛选通过的IP，作为初始候选
+
+    Returns:
+        dict: {地区代码: [(ip, min_delay, bandwidth, score), ...]} 每个地区最多 target_count 个，按带宽降序
+    """
+    targets = set()
+    for r in region_targets:
+        r = str(r).strip().upper()
+        if r and r.isalpha():
+            targets.add(r)
+    if not targets:
+        logger.info("ℹ️ 地区定向扫描未配置目标地区（region_targets 为空），跳过")
+        return {}
+
+    cidr_sources = CONFIG.get('ips_sources') or []
+    if not cidr_sources:
+        logger.warning("⚠️ 地区定向扫描需要配置 ips_sources（IP段源）才能补采候选，跳过")
+        return {}
+
+    candidate_goal = max(int(target_count) * 3, 30)
+    candidates = {t: set() for t in targets}
+    already_quick_tested = set()
+
+    logger.info("🎯 ===== 地区定向扫描 =====")
+    logger.info(f"🎯 目标地区: {', '.join(sorted(targets))} | 每个地区 {target_count} 个有效节点 | "
+                f"有效定义: 延迟<{valid_max_delay}ms 且 带宽>{valid_min_bandwidth}Mbps | 候选目标 {candidate_goal} 个")
+
+    # 第0轮：利用主流程已有的快速筛选通过IP作为初始候选
+    if existing_ips:
+        logger.info(f"🎯 复用主流程 {len(existing_ips)} 个已通过快速筛选的IP作为初始候选")
+        seed_results = get_regions_concurrently([(ip, 0, 0) for ip in existing_ips])
+        for ip, region_code, _, _ in seed_results:
+            already_quick_tested.add(ip)
+            if region_code in targets:
+                candidates[region_code].add(ip)
+
+    # 补采循环：候选不足则继续采样
+    for round_idx in range(1, max_rounds + 1):
+        if all(len(candidates[t]) >= candidate_goal for t in targets):
+            logger.info("🎯 所有目标地区候选数量已达标，提前结束补采")
+            break
+
+        logger.info(f"🎯 补采第 {round_idx}/{max_rounds} 轮：从IP段源采样（每网段 {per_segment} 个）")
+        sampled = collect_cidr_ips(cidr_sources, per_segment)
+        if not sampled:
+            logger.warning("⚠️ 本轮采样为空，停止补采")
+            break
+
+        new_ips = [ip for ip in sampled if ip not in already_quick_tested]
+        if not new_ips:
+            logger.warning("⚠️ 本轮无新增IP（已全部测过），停止补采")
+            break
+
+        quick_results = quick_filter_ips_concurrently(new_ips)
+        if not quick_results:
+            logger.warning(f"⚠️ 第{round_idx}轮快速筛选无可用IP，继续下一轮")
+            continue
+        already_quick_tested.update(ip for ip, _ in quick_results)
+
+        region_results = get_regions_concurrently([(ip, 0, 0) for ip, _ in quick_results])
+        round_gain = {t: 0 for t in targets}
+        for ip, region_code, _, _ in region_results:
+            if region_code in targets:
+                if ip not in candidates[region_code]:
+                    candidates[region_code].add(ip)
+                    round_gain[region_code] += 1
+
+        for t in sorted(targets):
+            logger.info(f"🎯 第{round_idx}轮后 {t}: 候选 {len(candidates[t])}/{candidate_goal}（本轮新增 {round_gain[t]}）")
+
+    # 深度测试：TCP Ping + 带宽测试，按有效定义筛选
+    valid_results = {}
+    for region in sorted(targets):
+        region_ips = sorted(candidates[region])
+        if not region_ips:
+            logger.warning(f"⚠️ 地区 {region} 没有候选IP，无法凑够有效节点")
+            continue
+
+        logger.info(f"🎯 ===== 深度测试地区 {region}（{len(region_ips)} 个候选） =====")
+        ping_results = test_ips_concurrently(region_ips)
+        if not ping_results:
+            logger.warning(f"⚠️ 地区 {region} TCP Ping 全部失败")
+            continue
+
+        bw_results = test_bandwidth_concurrently(ping_results)
+        valid = []
+        for ip, min_delay, avg_delay, bandwidth, latency, score in bw_results:
+            if min_delay < valid_max_delay and bandwidth > valid_min_bandwidth:
+                valid.append((ip, min_delay, bandwidth, score))
+        valid.sort(key=lambda x: x[2], reverse=True)  # 按带宽降序，速度快的在前
+
+        logger.info(f"🎯 地区 {region}: 深度测试通过 {len(bw_results)} 个，达到有效标准 {len(valid)} 个")
+        if valid:
+            valid_results[region] = valid[:target_count]
+            if len(valid) < target_count:
+                logger.warning(f"⚠️ 地区 {region} 有效节点 {len(valid)} < 目标 {target_count}"
+                               f"（可增大 region_scan_per_segment / region_max_rounds，或放宽有效定义）")
+
+    return valid_results
+
+
+def save_region_results(region_results: dict) -> None:
+    """
+    保存地区定向扫描结果
+
+    - 每个地区一个纯IP文件：Region-{CODE}.txt（如 Region-HK.txt，方便直接使用）
+    - 一个格式化汇总文件：Region-All.txt（按地区分组，含测速Mbps，速度快的排前面）
+
+    Args:
+        region_results (dict): scan_region_targets 的返回值
+    """
+    if not region_results:
+        logger.warning("⚠️ 地区定向扫描无有效结果，跳过保存")
+        return
+
+    all_lines = []
+    total = 0
+    for region in sorted(region_results.keys()):
+        items = region_results[region]
+        country_name = get_country_name(region)
+
+        single_file = f"{FILE_REGION_PREFIX}{region}.txt"
+        with open(single_file, 'w', encoding='utf-8') as f:
+            for ip, min_delay, bandwidth, score in items:
+                f.write(f"{ip}\n")
+        logger.info(f"📄 已保存地区 {region}（{country_name}）的 {len(items)} 个有效节点到 {single_file}")
+
+        for idx, (ip, min_delay, bandwidth, score) in enumerate(items, 1):
+            all_lines.append(f"{ip}#{region} {country_name}节点 | {bandwidth:.0f}Mbps | {idx:02d}")
+        total += len(items)
+
+    with open(FILE_REGION_ALL, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(all_lines))
+    logger.info(f"📄 已保存地区汇总 {total} 个有效节点到 {FILE_REGION_ALL}")
 
 # ===== 网络检测模块 =====
 # 网络连接测试功能，包括TCP连接、延迟测试、带宽测试等
@@ -1254,6 +1417,11 @@ def main() -> None:
         delete_file_if_exists(FILE_PRO_IP)
         delete_file_if_exists(FILE_PRO_REGION)
         delete_file_if_exists(FILE_RANKING)
+    # 地区定向扫描旧文件（Region-*.txt + 汇总），仅开启时清理
+    if CONFIG.get('region_targets'):
+        for old_file in glob.glob(f'{FILE_REGION_PREFIX}*.txt'):
+            delete_file_if_exists(old_file)
+        delete_file_if_exists(FILE_REGION_ALL)
     logger.info("🗑️ 预处理完成，旧文件已清理")
 
     # 2. 采集IP地址
@@ -1471,6 +1639,23 @@ def main() -> None:
                 logger.warning("⚠️ 高级版无有效记录可保存")
         else:
             logger.warning("⚠️ 高级版无有效记录可保存")
+
+    # 10.5 地区定向扫描（可选）：按国家/地区筛选，确保每个地区凑够指定数量的有效节点
+    # 参考 CloudflareSpeedTest 的 IP段扫描+测速思路（其本身不支持按国家筛选，这里内置整合）
+    region_targets = CONFIG.get('region_targets') or []
+    if region_targets:
+        region_results = scan_region_targets(
+            region_targets,
+            CONFIG.get('region_target_count', 10),
+            CONFIG.get('region_valid_max_delay', 300),
+            CONFIG.get('region_valid_min_bandwidth', 5),
+            CONFIG.get('region_scan_per_segment', 50),
+            CONFIG.get('region_max_rounds', 3),
+            existing_ips=filtered_ips,
+        )
+        save_region_results(region_results)
+    else:
+        logger.info("ℹ️ 地区定向扫描未开启（region_targets 为空数组），如需按国家地区筛选请配置 region_targets")
 
     # 11. 显示统计信息
     # 显示运行统计信息（缓存由入口finally统一保存）

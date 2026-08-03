@@ -92,7 +92,20 @@
   ],
 
   "cidr_ips_per_segment": 10,
-  "// cidr_ips_per_segment": "每个 IP 网段随机采样的 IP 数量（整数，可选，默认 10，自动限制在 1-50）。网段越大（如 /20 有 4096 个地址）采样价值越高；小网段（如 /24，256 个地址）会自动全部生成。建议 5-20，过大显著拖慢快速筛选阶段。",
+  "// cidr_ips_per_segment": "每个 IP 网段随机采样的 IP 数量（整数，可选，默认 10，自动限制在 1-200）。网段越大（如 /20 有 4096 个地址）采样价值越高；小网段（如 /24，256 个地址）会自动全部生成。建议 5-20，过大显著拖慢快速筛选阶段。",
+
+  "// region_targets 说明": "地区定向扫描：目标国家/地区代码数组（可选，空数组=关闭）。配置后程序会从 IP 段源（ips_sources）采样并深度测试，确保每个地区凑够 region_target_count 个有效节点（延迟<region_valid_max_delay 且 带宽>region_valid_min_bandwidth）。思路参考 XIU2/CloudflareSpeedTest（其本身不支持按国家筛选，这里内置整合），扫描全部 Cloudflare 官方网段后按地区筛选。常用代码见 常见国家地区参考表.md。",
+  "region_targets": ["HK", "JP", "US"],
+  "// region_target_count 说明": "每个目标地区需要的有效节点数量（整数，可选，默认10）。有效=延迟达标且带宽达标，不是候选数；凑不够会自动补采，保证输出的是测速后仍达标的节点。",
+  "region_target_count": 10,
+  "// region_valid_max_delay 说明": "有效节点延迟上限（毫秒，可选，默认300）。TCP Ping 延迟低于此值才算有效。",
+  "region_valid_max_delay": 300,
+  "// region_valid_min_bandwidth 说明": "有效节点带宽下限（Mbps，可选，默认5）。测速高于此值才算有效。",
+  "region_valid_min_bandwidth": 5,
+  "// region_scan_per_segment 说明": "补采时每个 IP 网段采样的数量（整数，可选，默认50，上限200）。采样越多越容易凑够有效节点，但快速筛选更慢。",
+  "region_scan_per_segment": 50,
+  "// region_max_rounds 说明": "每个地区最大补采轮数（整数，可选，默认3）。每轮从网段重新采样一批，直到候选足够或轮数用完。",
+  "region_max_rounds": 3,
 
   "test_ports": [
     443, 2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8443, 8444

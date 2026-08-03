@@ -7,7 +7,8 @@ Cloudflare 优选 IP 采集器 —— 自动收集、测速、评分并输出可
 - **原作者**：[Senflare](https://github.com/Senflare/Senflare-IP)（IP Test - Cloudflare优选IP采集器）
 - **现维护者**：[AllureLove98](https://github.com/AllureLove98)（Docker 化改造与维护）
 - 采集 16 个公开 IP 源 + 可选 Cloudflare 官方网段扫描 → TCP 连通性测试 → 地区识别 → 带宽测速 → 综合评分排序
-- 输出：`IPlist.txt`（基础可用 IP）、`Senflare.txt`（按地区）、`IPlist-Pro.txt`/`Senflare-Pro.txt`（进阶，含测速 Mbps）、`Ranking.txt`（评分排行）
+- 支持**地区定向扫描**：按国家/地区筛选（如 HK/JP/US），确保每个地区凑够指定数量的有效节点（参考 [CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest) 思路）
+- 输出：`IPlist.txt`（基础可用 IP）、`Senflare.txt`（按地区）、`IPlist-Pro.txt`/`Senflare-Pro.txt`（进阶，含测速 Mbps）、`Ranking.txt`（评分排行）、`Region-{CODE}.txt`/`Region-All.txt`（地区定向）
 - 支持代理采集、结果定时推送 GitHub、缓存复用
 
 ---
@@ -72,27 +73,33 @@ networks:
 cp config.example.json config.json
 ```
 
-| 配置项                      | 默认      | 说明                                |
-| --------------------------- | --------- | ----------------------------------- |
-| `ip_sources`                | 16 个源   | 采集的公开 IP 列表地址              |
-| `cidr_scan_enabled`         | true      | IP 段扫描总开关（可选）             |
-| `ips_sources`               | 1 个源    | CIDR 网段源（可选，扫描 CF 官方段） |
-| `cidr_ips_per_segment`      | 10        | 每网段采样 IP 数（可选）            |
-| `test_ports`                | 11 个端口 | TCP 测试端口                        |
-| `timeout`                   | 15        | 请求超时（秒）                      |
-| `api_timeout`               | 5         | API 超时（秒）                      |
-| `query_interval`            | 0.5       | 采集请求间隔                        |
-| `max_workers`               | 15        | 采集并发                            |
-| `batch_size`                | 30        | 批次大小                            |
-| `cache_ttl_hours`           | 168       | IP 缓存有效期（小时）               |
-| `quick_filter_ports`        | [443]     | 快速过滤端口                        |
-| `region_workers`            | 10        | 地区识别并发                        |
-| `bandwidth_workers`         | 5         | 测速并发                            |
-| `advanced_mode`             | true      | 进阶模式（Pro/Ranking）             |
-| `bandwidth_test_count`      | 3         | 测速次数                            |
-| `bandwidth_test_size_mb`    | 50        | 测速文件大小（MB）                  |
-| `latency_filter_percentage` | 40        | 延迟过滤比例（%）                   |
-| `use_proxy_for_collection`  | true      | 采集是否走代理                      |
+| 配置项                       | 默认      | 说明                                      |
+| ---------------------------- | --------- | ----------------------------------------- |
+| `ip_sources`                 | 16 个源   | 采集的公开 IP 列表地址                    |
+| `cidr_scan_enabled`          | true      | IP 段扫描总开关（可选）                   |
+| `ips_sources`                | 1 个源    | CIDR 网段源（可选，扫描 CF 官方段）       |
+| `cidr_ips_per_segment`       | 10        | 每网段采样 IP 数（可选）                  |
+| `region_targets`             | []        | 地区定向扫描目标地区（可选，如 HK,JP,US） |
+| `region_target_count`        | 10        | 每个地区需要的有效节点数                  |
+| `region_valid_max_delay`     | 300       | 有效节点延迟上限（ms）                    |
+| `region_valid_min_bandwidth` | 5         | 有效节点带宽下限（Mbps）                  |
+| `region_scan_per_segment`    | 50        | 补采时每网段采样数（可选）                |
+| `region_max_rounds`          | 3         | 最大补采轮数（可选）                      |
+| `test_ports`                 | 11 个端口 | TCP 测试端口                              |
+| `timeout`                    | 15        | 请求超时（秒）                            |
+| `api_timeout`                | 5         | API 超时（秒）                            |
+| `query_interval`             | 0.5       | 采集请求间隔                              |
+| `max_workers`                | 15        | 采集并发                                  |
+| `batch_size`                 | 30        | 批次大小                                  |
+| `cache_ttl_hours`            | 168       | IP 缓存有效期（小时）                     |
+| `quick_filter_ports`         | [443]     | 快速过滤端口                              |
+| `region_workers`             | 10        | 地区识别并发                              |
+| `bandwidth_workers`          | 5         | 测速并发                                  |
+| `advanced_mode`              | true      | 进阶模式（Pro/Ranking）                   |
+| `bandwidth_test_count`       | 3         | 测速次数                                  |
+| `bandwidth_test_size_mb`     | 50        | 测速文件大小（MB）                        |
+| `latency_filter_percentage`  | 40        | 延迟过滤比例（%）                         |
+| `use_proxy_for_collection`   | true      | 采集是否走代理                            |
 
 ### 运行参数（`env` 区块）
 
@@ -112,6 +119,16 @@ cp config.example.json config.json
 | `NO_PROXY`                             | localhost,127.0.0.1      | 不走代理的地址                       |
 
 > 💡 `GITHUB_TOKEN` 等敏感信息不建议写入 `config.json` 并提交，推荐用 `.env` 或 Docker 环境变量注入。
+
+### 地区定向扫描（可选）
+
+参考 [XIU2/CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest) 的 IP 段扫描 + 测速思路（其本身不支持按国家筛选），程序内置了**按国家/地区筛选**的整合实现：
+
+- 配置 `region_targets` 选择目标地区（如 `["HK","JP","US"]`），程序从 Cloudflare 官方网段（`ips_sources`）采样并深度测速
+- 配置 `region_target_count` 指定每个地区要多少个**有效节点**——"有效"由 `region_valid_max_delay`（延迟上限）和 `region_valid_min_bandwidth`（带宽下限）定义，均可自定义
+- 候选不足会自动**补采**（`region_scan_per_segment` / `region_max_rounds`），保证输出的是测速后仍达标的节点，而不是筛出来一堆最后只剩几个
+- 输出：每个地区一个纯 IP 文件 `Region-{CODE}.txt`（如 `Region-HK.txt`）+ 汇总文件 `Region-All.txt`（含测速 Mbps，速度快的排前面）
+- 全部国家/地区代码见 [常见国家地区参考表.md](常见国家地区参考表.md)
 
 ### 结果推送机制（无需 GitHub Actions）
 
@@ -168,6 +185,7 @@ python IPtest.py
 ```
 ├── IPtest.py            # 主程序
 ├── config.example.json  # 配置模板
+├── 常见国家地区参考表.md  # 地区代码对照表（region_targets 用）
 ├── requirements.txt
 ├── entrypoint.sh        # Docker 循环调度入口
 ├── Dockerfile
