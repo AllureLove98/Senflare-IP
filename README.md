@@ -1,9 +1,13 @@
-# Senflare-IP
+# Senflare-IP（Docker 版）
 
 Cloudflare 优选 IP 采集器 —— 自动收集、测速、评分并输出可用 IP 列表。
 
-- 采集 16 个公开 IP 源 → TCP 连通性测试 → 地区识别 → 带宽测速 → 综合评分排序
-- 输出：`IPlist.txt`（基础可用 IP）、`Senflare.txt`（按地区）、`IPlist-Pro.txt`/`Senflare-Pro.txt`（进阶）、`Ranking.txt`（评分排行）
+> 📦 **本仓库为 Docker 部署版本**，基于原作者 [Senflare](https://github.com/Senflare/Senflare-IP) 的开源项目 **IP Test - Cloudflare优选IP采集器** 改造而来，在其基础上提供容器化部署、定时循环运行、结果自动推送 GitHub 等能力。
+
+- **原作者**：[Senflare](https://github.com/Senflare/Senflare-IP)（IP Test - Cloudflare优选IP采集器）
+- **现维护者**：[AllureLove98](https://github.com/AllureLove98)（Docker 化改造与维护）
+- 采集 16 个公开 IP 源 + 可选 Cloudflare 官方网段扫描 → TCP 连通性测试 → 地区识别 → 带宽测速 → 综合评分排序
+- 输出：`IPlist.txt`（基础可用 IP）、`Senflare.txt`（按地区）、`IPlist-Pro.txt`/`Senflare-Pro.txt`（进阶，含测速 Mbps）、`Ranking.txt`（评分排行）
 - 支持代理采集、结果定时推送 GitHub、缓存复用
 
 ---
@@ -71,6 +75,7 @@ cp config.example.json config.json
 | 配置项                      | 默认      | 说明                                |
 | --------------------------- | --------- | ----------------------------------- |
 | `ip_sources`                | 16 个源   | 采集的公开 IP 列表地址              |
+| `cidr_scan_enabled`         | true      | IP 段扫描总开关（可选）             |
 | `ips_sources`               | 1 个源    | CIDR 网段源（可选，扫描 CF 官方段） |
 | `cidr_ips_per_segment`      | 10        | 每网段采样 IP 数（可选）            |
 | `test_ports`                | 11 个端口 | TCP 测试端口                        |
@@ -172,4 +177,6 @@ python IPtest.py
 
 ## 📄 License
 
-MIT
+[MIT](LICENSE)
+
+本项目由 [Senflare](https://github.com/Senflare/Senflare-IP) 的原作衍生而来，与原项目许可证一致（MIT），版权归原作者 Senflare 与现维护者 AllureLove98 共同所有。

@@ -1,5 +1,5 @@
 """
-Cloudflare优选IP采集器 v2.4.0
+Cloudflare优选IP采集器 v2.5.0
 ===============================================
 
 一个高效、智能的Cloudflare优选IP采集和检测工具，专为网络优化而设计。
@@ -7,7 +7,7 @@ Cloudflare优选IP采集器 v2.4.0
 🎯 核心功能
 -----------
 • IP采集：多API源并发采集，获取大量候选IP地址
-• IP段扫描：从CIDR网段源（如Cloudflare官方ips-v4）随机采样IP，发现公开列表外的优选IP
+• IP段扫描：从CIDR网段源（如Cloudflare官方ips-v4）随机采样IP，发现公开列表外的优选IP（可用开关控制）
 • 智能筛选：TCP连接测试快速剔除不可用IP
 • 性能测试：TCP Ping延迟测试 + HTTP带宽测试
 • 地区识别：自动识别IP地理位置，支持缓存机制
@@ -30,7 +30,7 @@ Cloudflare优选IP采集器 v2.4.0
 • IPlist.txt - 基础版IP列表（快速筛选结果）
 • Senflare.txt - 基础版格式化IP列表（按地区分组）
 • IPlist-Pro.txt - 高级版IP列表（性能测试结果）
-• Senflare-Pro.txt - 高级版格式化IP列表（按地区分组）
+• Senflare-Pro.txt - 高级版格式化IP列表（按地区分组，含测速 Mbps，速度快的排前面）
 • Ranking.txt - 详细排名信息（延迟、带宽、评分）
 • Cache.json - 地区信息缓存文件
 • IPtest.log - 详细运行日志
@@ -43,7 +43,7 @@ Cloudflare优选IP采集器 v2.4.0
 • 智能缓存管理，支持TTL和大小限制
 
 作者：Senflare
-版本：v2.4.0
+版本：v2.5.0
 更新：2026年8月3日
 """
 
@@ -1311,16 +1311,19 @@ def main() -> None:
     
     logger.info(f"📊 采集统计: 成功 {successful_sources} 个源，失败 {failed_sources} 个源")
 
-    # 2.5 IP段扫描（可选）：从 CIDR 段源采集网段并采样 IP，扩充候选池
+    # 2.5 IP段扫描（可选，由 cidr_scan_enabled 开关控制）：从 CIDR 段源采集网段并采样 IP
     # 与 ip_sources（具体IP列表）互补，可发现未被公开列表覆盖的 Cloudflare IP
-    cidr_sources = CONFIG.get('ips_sources') or []
-    if cidr_sources:
-        logger.info("📥 ===== 采集IP段（CIDR扫描） =====")
-        cidr_ips = collect_cidr_ips(cidr_sources, CONFIG.get('cidr_ips_per_segment', 10))
-        logger.info(f"🔢 IP段扫描共采样 {len(cidr_ips)} 个IP地址")
-        all_ips.extend(cidr_ips)
+    if CONFIG.get('cidr_scan_enabled', False):
+        cidr_sources = CONFIG.get('ips_sources') or []
+        if cidr_sources:
+            logger.info("📥 ===== 采集IP段（CIDR扫描） =====")
+            cidr_ips = collect_cidr_ips(cidr_sources, CONFIG.get('cidr_ips_per_segment', 10))
+            logger.info(f"🔢 IP段扫描共采样 {len(cidr_ips)} 个IP地址")
+            all_ips.extend(cidr_ips)
+        else:
+            logger.warning("⚠️ cidr_scan_enabled 已开启但未配置 ips_sources，跳过IP段扫描")
     else:
-        logger.info("ℹ️ 未配置 ips_sources，跳过IP段扫描（如需扫描 Cloudflare 官方网段，请配置 https://www.cloudflare.com/ips-v4）")
+        logger.info("ℹ️ IP段扫描已关闭（cidr_scan_enabled=false），如需扫描 Cloudflare 官方网段请开启并配置 ips_sources")
 
     # 3. IP去重与排序
     # 对采集到的IP进行去重和排序，确保唯一性
@@ -1435,24 +1438,29 @@ def main() -> None:
             # 保存高级格式化文件（使用优选IP重新生成）
             # 对优选IP进行地区识别，生成高级版格式化结果
             logger.info("🌍 ===== 高级地区识别与结果格式化 =====")
+            # 构建 IP -> 带宽 映射（用于格式化时显示 Mbps 并按速度排序）
+            bandwidth_map = {ip: bandwidth for ip, _, _, bandwidth, _, _ in available_ips}
             pro_ip_delay_data = [(ip, 0, 0) for ip, _, _, _, _, _ in available_ips]
             pro_region_results = get_regions_concurrently(pro_ip_delay_data)
             
-            # 按地区分组
+            # 按地区分组（附带带宽信息）
             pro_region_groups = defaultdict(list)
             for ip, region_code, min_delay, avg_delay in pro_region_results:
                 country_name = get_country_name(region_code)
-                pro_region_groups[country_name].append((ip, region_code, min_delay, avg_delay))
+                pro_region_groups[country_name].append((ip, region_code, min_delay, avg_delay, bandwidth_map.get(ip, 0)))
             
             logger.info(f"🌍 高级地区分组完成，共 {len(pro_region_groups)} 个地区")
             
-            # 生成高级格式化结果
+            # 生成高级格式化结果：速度快的排在前面
+            # 地区内按带宽降序，地区之间按组内最高带宽降序（整个文件从快到慢）
             pro_result = []
-            for region in sorted(pro_region_groups.keys()):
-                # 同一地区内按延迟排序（更快的在前）
-                sorted_ips = sorted(pro_region_groups[region], key=lambda x: x[2])  # 按min_delay排序
-                for idx, (ip, code, min_delay, avg_delay) in enumerate(sorted_ips, 1):
-                    pro_result.append(f"{ip}#{code} {region}节点 | {idx:02d}")
+            for region, items in sorted(pro_region_groups.items(),
+                                        key=lambda kv: max(x[4] for x in kv[1]),
+                                        reverse=True):
+                # 同一地区内按带宽降序（速度更快的在前）
+                sorted_ips = sorted(items, key=lambda x: x[4], reverse=True)  # 按带宽排序
+                for idx, (ip, code, min_delay, avg_delay, bandwidth) in enumerate(sorted_ips, 1):
+                    pro_result.append(f"{ip}#{code} {region}节点 | {bandwidth:.0f}Mbps | {idx:02d}")
                 logger.debug(f"高级地区 {region} 格式化完成，包含 {len(sorted_ips)} 个IP")
             
             if pro_result:

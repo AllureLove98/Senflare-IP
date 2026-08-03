@@ -79,7 +79,11 @@
     "https://raw.githubusercontent.com/HandsomeMJZ/cfip/refs/heads/main/full_ips.txt  # HandsomeMJZ 全量IP"
   ],
 
-  "// ips_sources 说明": "Cloudflare IP 段源列表（数组，可选，留空 [] = 不启用段扫描）。与 ip_sources 不同，这里返回的是 CIDR 网段（如 173.245.48.0/20），程序会从每个网段随机采样 cidr_ips_per_segment 个 IP 加入候选池，用于发现未被公开列表覆盖的 Cloudflare 优选 IP。推荐使用 Cloudflare 官方段列表 https://www.cloudflare.com/ips-v4（纯文本，每行一个网段）。注意：网段内大部分 IP 不可用，快速筛选会自动剔除，采样数越大扫描越全面但越慢。",
+  "// cidr_scan_enabled 说明": "IP段扫描总开关（布尔，可选，默认 true）。true=启用段扫描（需同时配置 ips_sources）；false=关闭，即使配置了 ips_sources 也不会扫描，候选池仅来自 ip_sources。",
+
+  "cidr_scan_enabled": true,
+
+  "// ips_sources 说明": "Cloudflare IP 段源列表（数组，可选，留空 [] = 不启用段扫描）。与 ip_sources 不同，这里返回的是 CIDR 网段（如 173.245.48.0/20），程序会从每个网段随机采样 cidr_ips_per_segment 个 IP 加入候选池，用于发现未被公开列表覆盖的 Cloudflare 优选 IP。推荐使用 Cloudflare 官方段列表 https://www.cloudflare.com/ips-v4（纯文本，每行一个网段）。注意：网段内大部分 IP 不可用，快速筛选会自动剔除，采样数越大扫描越全面但越慢。仅当 cidr_scan_enabled=true 时生效。",
 
   "ips_sources": ["https://www.cloudflare.com/ips-v4"],
   "// ips_sources 常用源速查": [
