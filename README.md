@@ -32,7 +32,7 @@ services:
     restart: unless-stopped
     working_dir: /app
     volumes:
-      # - ./config.json:/app/config.json:ro   # 可选：自定义配置
+      # - ./config:/app/config   # 可选：自定义配置
       # - ./output:/app/output                 # 可选：结果同步到宿主机
     environment:
       TZ: Asia/Shanghai
@@ -95,6 +95,7 @@ cp config.example.json config.json
 | -------------------------------------- | ------------------------ | ------------------------------------ |
 | `RUN_INTERVAL_SECONDS`                 | 10800                    | 运行间隔（秒）                       |
 | `GIT_PUSH_ENABLED`                     | false                    | 是否推送结果到 GitHub                |
+| `GIT_RESULT_BRANCH`                    | results                  | 结果推送到的分支（与代码 main 分离） |
 | `GITHUB_TOKEN`                         | ""                       | GitHub Token（敏感，建议用环境变量） |
 | `GITHUB_REPOSITORY`                    | AllureLove98/Senflare-IP | 推送目标仓库                         |
 | `GIT_USER_NAME`                        | GitHub Action            | Git 提交用户名                       |
@@ -104,6 +105,21 @@ cp config.example.json config.json
 | `NO_PROXY`                             | localhost,127.0.0.1      | 不走代理的地址                       |
 
 > 💡 `GITHUB_TOKEN` 等敏感信息不建议写入 `config.json` 并提交，推荐用 `.env` 或 Docker 环境变量注入。
+
+### 结果推送机制（无需 GitHub Actions）
+
+结果**不推送到 `main` 代码分支**，而是推送到独立的 `results` 分支（可用 `GIT_RESULT_BRANCH` 修改）：
+
+```
+GitHub 仓库
+├── main 分支     → 代码（IPtest.py、Dockerfile 等），由 Docker 构建 workflow 使用
+└── results 分支  → 运行结果（IPlist.txt、Senflare.txt、Ranking.txt 等），由容器自动推送
+```
+
+- 容器内 `entrypoint.sh` 在独立目录 `/app/results-repo` 维护 git，只提交输出文件，**不触碰代码**
+- 每次推送前以远端 `results` 分支为基准 `reset --hard` 对齐，彻底避免 `fetch first` 冲突
+- 推送失败自动 `--force` 兜底（结果分支历史由容器掌控，安全）
+- 无需 GitHub Actions、无需定时 workflow，容器自己按 `RUN_INTERVAL_SECONDS` 循环运行
 
 ---
 

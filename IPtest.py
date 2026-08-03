@@ -528,11 +528,10 @@ def quick_filter_ip(ip: str) -> tuple:
 
 def test_ip_bandwidth_only(ip: str, current: int, total: int, sess: requests.Session | None = None) -> tuple:
     """
-    通过HTTP下载测试IP带宽性能（直连目标IP + Host头）
+    通过HTTP下载测试IP带宽性能
 
     使用真实的HTTP下载测试来测量IP的带宽性能：
-    通过 Host 头将请求路由到目标IP的 speed.cloudflare.com 服务，
-    确保测的是目标IP本身的带宽，而不是公网直达的带宽。
+    通过下载指定大小的文件来评估网络速度。
 
     Args:
         ip (str): 要测试的IP地址
@@ -560,14 +559,10 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int, sess: requests.Ses
 
         start_total = time.time()
         test_size_bytes = CONFIG["bandwidth_test_size_mb"] * 1024 * 1024
-
-        # 直连目标IP，通过Host头路由到speed.cloudflare.com（等效curl --resolve）
-        # 注意：证书是签给speed.cloudflare.com的，直连IP需关闭证书校验
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Host': 'speed.cloudflare.com',
-        }
-        test_url = f"https://{ip}/__down?bytes={test_size_bytes}"
+        test_urls = [
+            f"https://speed.cloudflare.com/__down?bytes={test_size_bytes}",
+            f"https://httpbin.org/bytes/{test_size_bytes}",
+        ]
 
         best_speed = 0
         best_latency = 0
@@ -579,58 +574,56 @@ def test_ip_bandwidth_only(ip: str, current: int, total: int, sess: requests.Ses
                 logger.info(f"⏱️ IP {ip} 带宽测试总超时（>{TOTAL_TIMEOUT}s），放弃")
                 break
 
-            try:
-                start_time = time.time()
-                response = http.get(
-                    test_url,
-                    timeout=REQUEST_TIMEOUT,
-                    headers=headers,
-                    stream=True,
-                    verify=False,
-                )
-                if response.status_code == 200:
-                    data_size = 0
-                    start_download = time.time()
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            data_size += len(chunk)
-                            # 单次下载超时检测（保持截断，避免测试过久）
-                            if time.time() - start_download > DOWNLOAD_TIMEOUT:
-                                break
-                            # 积累足够数据即停止
-                            if data_size >= test_size_bytes:
-                                break
+            for url in test_urls:
+                # 再次检查总超时（每次请求前）
+                if time.time() - start_total > TOTAL_TIMEOUT:
+                    break
 
-                    download_time = time.time() - start_download
-                    latency = (start_download - start_time) * 1000
+                try:
+                    start_time = time.time()
+                    response = http.get(
+                        url,
+                        timeout=REQUEST_TIMEOUT,
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                        stream=True,
+                    )
+                    if response.status_code == 200:
+                        data_size = 0
+                        start_download = time.time()
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                data_size += len(chunk)
+                                # 单次下载超时检测（保持截断，避免测试过久）
+                                if time.time() - start_download > DOWNLOAD_TIMEOUT:
+                                    break
+                                # 积累足够数据即停止
+                                if data_size >= test_size_bytes:
+                                    break
 
-                    if download_time > 0 and data_size > 0:
-                        speed_mbps = (data_size * 8) / (download_time * 1000000)
-                        if speed_mbps > best_speed:
-                            best_speed = speed_mbps
-                            if latency > 0:
-                                best_latency = latency
+                        download_time = time.time() - start_download
+                        latency = (start_download - start_time) * 1000
 
-                        # 速度很好，提前返回
-                        if speed_mbps > 100:
-                            logger.info(f"⚡ [{current}/{total}] {ip}（带宽综合速度：{best_speed:.2f}Mbps）")
-                            return (True, best_speed, best_latency)
-            except Exception as e:
-                logger.debug(f"IP {ip} 带宽测试请求异常: {str(e)[:50]}")
-                continue
+                        if download_time > 0 and data_size > 0:
+                            speed_mbps = (data_size * 8) / (download_time * 1000000)
+                            if speed_mbps > best_speed:
+                                best_speed = speed_mbps
+                                if latency > 0:
+                                    best_latency = latency
+
+                            # 速度很好，提前返回
+                            if speed_mbps > 100:
+                                logger.info(f"⚡ [{current}/{total}] {ip}（带宽综合速度：{best_speed:.2f}Mbps）")
+                                return (True, best_speed, best_latency)
+                except Exception as e:
+                    logger.debug(f"IP {ip} 带宽测试请求异常: {str(e)[:50]}")
+                    continue
 
         if best_speed > 0:
             logger.info(f"⚡ [{current}/{total}] {ip}（带宽综合速度：{best_speed:.2f}Mbps）")
             return (True, best_speed, best_latency)
         else:
-            # 带宽测试失败，降级为延迟测试
-            is_available, latency = test_ip_availability(ip)
-            if is_available:
-                logger.info(f"⚡ [{current}/{total}] {ip}（带宽测试失败，使用延迟作为替代指标）")
-                return (True, 0, latency)
-            else:
-                logger.info(f"⚡ [{current}/{total}] {ip}（带宽测试失败）")
-                return (False, 0, 0)
+            logger.info(f"⚡ [{current}/{total}] {ip}（带宽测试失败）")
+            return (False, 0, 0)
     except Exception as e:
         logger.error(f"IP {ip} 带宽测试异常: {str(e)[:50]}")
         return (False, 0, 0)

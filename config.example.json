@@ -5,6 +5,7 @@
   "env": {
     "RUN_INTERVAL_SECONDS": 10800,
     "GIT_PUSH_ENABLED": false,
+    "GIT_RESULT_BRANCH": "results",
     "GITHUB_TOKEN": "",
     "GITHUB_REPOSITORY": "AllureLove98/Senflare-IP",
     "GIT_USER_NAME": "GitHub Action",
