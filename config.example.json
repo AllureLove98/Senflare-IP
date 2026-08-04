@@ -1,50 +1,19 @@
 {
-  "// 说明": "Senflare-IP 配置文件模板（唯一配置来源）。复制为 config.json 后按需修改，并挂载到容器 /app/config.json。本程序不内置任何默认值：以下 18 个配置项 + env 区块全部必填，缺失任一都会启动报错。所有以 // 开头的键都是注释，程序会自动忽略，可放心保留。",
-
-  "// env 区块说明": "运行参数与机密信息，等价于环境变量，会被写入容器环境变量。优先级：已设置的容器环境变量 > 此处配置（即 compose 里写死的环境变量优先，此处用于兜底）。GITHUB_TOKEN 等敏感信息建议用 compose environment 或 .env 注入，避免提交到仓库。",
   "env": {
-    "// LOG_LEVEL": "日志级别：DEBUG=输出全部逐IP/逐端口/逐请求明细（排查问题用）；INFO=只显示汇总（默认）；WARNING=仅警告+错误；ERROR=仅错误。注意：若 compose environment 里写死了 LOG_LEVEL（哪怕为空串），会覆盖这里的设置，两者保持一致才能生效。",
     "LOG_LEVEL": "INFO",
-
-    "// RUN_INTERVAL_SECONDS": "两次运行之间的间隔（秒），默认 10800 = 3小时。由 entrypoint.sh 的循环调度使用。",
     "RUN_INTERVAL_SECONDS": 10800,
-
-    "// GIT_PUSH_ENABLED": "是否把运行结果推送到 GitHub 的 results 分支：true=推送，false=不推送（默认）。",
     "GIT_PUSH_ENABLED": false,
-
-    "// GIT_RESULT_BRANCH": "结果推送的目标分支名，默认 results（与 main 代码分支分离，避免冲突）。",
     "GIT_RESULT_BRANCH": "results",
-
-    "// GITHUB_TOKEN": "GitHub 访问令牌（Personal Access Token），用于推送结果。有仓库读写权限（repo 权限）。留空则跳过推送。强烈建议通过 compose environment 注入，不要写进仓库。",
     "GITHUB_TOKEN": "",
-
-    "// GITHUB_REPOSITORY": "目标仓库，格式：所有者/仓库名，例如 AllureLove98/Senflare-IP。",
     "GITHUB_REPOSITORY": "AllureLove98/Senflare-IP",
-
-    "// GIT_USER_NAME": "结果提交使用的 git 用户名（显示在 commits 里）。",
     "GIT_USER_NAME": "GitHub Action",
-
-    "// GIT_USER_EMAIL": "结果提交使用的 git 邮箱。",
     "GIT_USER_EMAIL": "action@github.com",
-
-    "// COMMIT_MESSAGE": "结果提交的 commit message 前缀，后面会自动追加 UTC 时间戳。",
     "COMMIT_MESSAGE": "Update IP results",
-
-    "// HTTP_PROXY": "HTTP 代理地址，例如 http://Clash:3oS023JY@10.0.0.3:7893。留空=直连。仅采集 IP 阶段使用（取决于 use_proxy_for_collection）。",
     "HTTP_PROXY": "",
-
-    "// HTTPS_PROXY": "HTTPS 代理地址，同上。",
     "HTTPS_PROXY": "",
-
-    "// ALL_PROXY": "通用代理地址（同时覆盖 http/https），同上。",
     "ALL_PROXY": "",
-
-    "// NO_PROXY": "不走代理的地址白名单，逗号分隔，默认本机回环地址。",
     "NO_PROXY": "localhost,127.0.0.1"
   },
-
-  "// ip_sources 说明": "IP 采集源列表（数组，必填，至少 1 个）。程序并发请求所有源并提取 IPv4 地址。每个源的响应会单独记录状态码/字节数/提取数量（DEBUG 级别）。失效的源直接从数组里删除即可。",
-
   "ip_sources": [
     "https://cf.hyli.xyz/",
     "https://api.urlce.com/cloudflare.html",
@@ -61,102 +30,53 @@
     "https://ip.164746.xyz/ipTop10.html",
     "https://raw.githubusercontent.com/HandsomeMJZ/cfip/refs/heads/main/full_ips.txt"
   ],
-  "// ip_sources 常用源速查": [
-    "https://cf.hyli.xyz/                                   # 行雺",
-    "https://ipdb.api.030101.xyz/?type=bestcf&country=true  # Ymyuuu",
-    "https://api.urlce.com/cloudflare.html                  # 麒麟",
-    "https://addressesapi.090227.xyz/CloudFlareYes          # Hostmonit",
-    "https://cf.090227.xyz/CloudFlareYes                    # Hostmonit（备用）",
-    "https://ipdb.api.030101.xyz/?type=bestcf;bestproxy&country=true  # Mingyu",
-    "https://vps789.com/openApi/cfIpTop20                   # VPS789-综合排名前20",
-    "https://vps789.com/openApi/cfIpApi                     # VPS789-动态获取",
-    "https://www.wetest.vip/page/cloudflare/address_v4.html # 微测网",
-    "https://www.wetest.vip/page/cloudflare/total_v4.html   # 微测网",
-    "https://cf.090227.xyz/cmcc?ips=50                      # CMLiussss-电信",
-    "https://cf.090227.xyz/ct?ips=50                        # CMLiussss-移动",
-    "https://cf.090227.xyz/cu?ips=50                        # CMLiussss-联通",
-    "https://ip.164746.xyz/ipTop10.html                     # 每日TOP10",
-    "https://raw.githubusercontent.com/HandsomeMJZ/cfip/refs/heads/main/full_ips.txt  # HandsomeMJZ 全量IP"
-  ],
-
-  "// cidr_scan_enabled 说明": "IP段扫描总开关（布尔，可选，默认 true）。true=启用段扫描（需同时配置 ips_sources）；false=关闭，即使配置了 ips_sources 也不会扫描，候选池仅来自 ip_sources。",
-
   "cidr_scan_enabled": true,
-
-  "// ips_sources 说明": "Cloudflare IP 段源列表（数组，可选，留空 [] = 不启用段扫描）。与 ip_sources 不同，这里返回的是 CIDR 网段（如 173.245.48.0/20），程序会从每个网段随机采样 cidr_ips_per_segment 个 IP 加入候选池，用于发现未被公开列表覆盖的 Cloudflare 优选 IP。推荐使用 Cloudflare 官方段列表 https://www.cloudflare.com/ips-v4（纯文本，每行一个网段）。注意：网段内大部分 IP 不可用，快速筛选会自动剔除，采样数越大扫描越全面但越慢。仅当 cidr_scan_enabled=true 时生效。",
-
-  "ips_sources": ["https://www.cloudflare.com/ips-v4"],
-  "// ips_sources 常用源速查": [
-    "https://www.cloudflare.com/ips-v4   # Cloudflare 官方 IPv4 网段（推荐）",
-    "https://www.cloudflare.com/ips-v6   # Cloudflare 官方 IPv6 网段（本工具仅支持 IPv4，暂不可用）"
+  "ips_sources": [
+    "https://www.cloudflare.com/ips-v4"
   ],
-
-  "// cidr_ips_per_segment": "每个 IP 网段随机采样的 IP 数量（整数，可选，默认 10，自动限制在 1-200）。网段越大（如 /20 有 4096 个地址）采样价值越高；小网段（如 /24，256 个地址）会自动全部生成。建议 5-20，过大显著拖慢快速筛选阶段。",
   "cidr_ips_per_segment": 10,
-
-  "// region_targets 说明": "地区定向扫描：目标国家/地区代码数组（可选，空数组=关闭）。配置后程序会从 IP 段源（ips_sources）采样并深度测试，确保每个地区凑够 region_target_count 个有效节点（延迟<region_valid_max_delay 且 带宽>region_valid_min_bandwidth）。思路参考 XIU2/CloudflareSpeedTest（其本身不支持按国家筛选，这里内置整合），扫描全部 Cloudflare 官方网段后按地区筛选。常用代码见 常见国家地区参考表.md。",
-  "region_targets": ["HK", "JP", "US"],
-  "// region_target_count 说明": "每个目标地区需要的有效节点数量（整数，可选，默认10）。有效=延迟达标且带宽达标，不是候选数；凑不够会自动补采，保证输出的是测速后仍达标的节点。",
-  "region_target_count": 10,
-  "// region_valid_max_delay 说明": "有效节点延迟上限（毫秒，可选，默认300）。TCP Ping 延迟低于此值才算有效。",
-  "region_valid_max_delay": 300,
-  "// region_valid_min_bandwidth 说明": "有效节点带宽下限（Mbps，可选，默认5）。测速高于此值才算有效。",
-  "region_valid_min_bandwidth": 5,
-  "// region_scan_per_segment 说明": "补采时每个 IP 网段采样的数量（整数，可选，默认50，上限200）。采样越多越容易凑够有效节点，但快速筛选更慢。",
-  "region_scan_per_segment": 50,
-  "// region_max_rounds 说明": "每个地区最大补采轮数（整数，可选，默认3）。每轮从网段重新采样一批，直到候选足够或轮数用完。",
-  "region_max_rounds": 3,
-
-  "// test_ports": "TCP 连接测试端口（数组，必填）：443=HTTPS标准端口；2052/2053/2082/2083/2086/2087/2095/2096/8443/8444=Cloudflare 专用端口。测试时逐个端口 connect 取最小延迟。端口越多越全面但越慢。",
-  "test_ports": [
-    443, 2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8443, 8444
+  "region_targets": [
+    "HK",
+    "JP",
+    "US"
   ],
-
-  "// timeout": "IP 采集阶段单个源的请求超时（秒）。源响应慢或卡住时提前放弃，避免整体拖慢。",
+  "region_target_count": 10,
+  "region_valid_max_delay": 300,
+  "region_valid_min_bandwidth": 5,
+  "region_scan_per_segment": 50,
+  "region_max_rounds": 3,
+  "test_ports": [
+    443,
+    2052,
+    2053,
+    2082,
+    2083,
+    2086,
+    2087,
+    2095,
+    2096,
+    8443,
+    8444
+  ],
   "timeout": 15,
-
-  "// api_timeout": "地区识别 API（ipinfo.io / ip-api.com）查询超时（秒），默认 5。",
   "api_timeout": 5,
-
-  "// query_interval": "采集源之间的请求间隔（秒），默认 0.5。过快可能被源限流。",
   "query_interval": 0.5,
-
-  "// max_workers": "最大并发线程数：快速筛选 + TCP Ping 阶段使用。越大越快但占用 CPU/带宽越高。GitHub Actions 环境建议 15。",
   "max_workers": 15,
-
-  "// batch_size": "并发处理的批次大小：每批处理多少个 IP。配合 max_workers 控制并发节奏。",
   "batch_size": 30,
-
-  "// cache_ttl_hours": "地区信息缓存有效期（小时），默认 168 = 7天。到期后重新查询 ipinfo.io。缓存保存在 Cache.json。",
   "cache_ttl_hours": 168,
-
-  "// quick_filter_ports": "快速筛选阶段测试端口（数组）：只测这些端口快速剔除明显不可用的 IP。默认只测 443，速度优先。想更严苛可加入其他端口，如 [443, 2052, 2053]。",
-  "quick_filter_ports": [443],
-
-  "// region_workers": "地区识别并发线程数：同时查询多少个 IP 的地理位置。",
+  "quick_filter_ports": [
+    443
+  ],
   "region_workers": 10,
-
-  "// bandwidth_workers": "带宽测试并发线程数：同时测速多少个 IP。每个测速请求会占满单连接带宽，建议 5 以下避免互相拖慢。",
   "bandwidth_workers": 5,
-
-  "// advanced_mode": "高级模式开关：true=开启（执行延迟排名筛选→TCP Ping→带宽测试→生成 IPlist-Pro.txt/Senflare-Pro.txt/Ranking.txt）；false=关闭（只生成基础版 IPlist.txt/Senflare.txt，快速很多）。",
   "advanced_mode": true,
-
-  "// bandwidth_test_count": "每个 IP 的带宽测速次数：取多次中的最高速度。次数越多越准但越慢；单 IP 总超时 15 秒，速度 >100Mbps 提前结束。",
   "bandwidth_test_count": 3,
-
-  "// bandwidth_test_size_mb": "带宽测试下载文件大小（MB），默认 50。越大测速越准但耗时越长；下载超时 5 秒，超时按已下载量折算速度。",
   "bandwidth_test_size_mb": 50,
-
-  "// rate_limit_pause_seconds": "带宽测试遇到 HTTP 429（服务器限流）时自动暂停的秒数，默认 60。暂停期间所有测速线程等待，结束后自动恢复，避免持续触发限流。",
   "rate_limit_pause_seconds": 60,
-
-  "// bandwidth_retry_rounds": "因 429 限流而失败的 IP 自动重试轮数（整数，默认 2）。每轮：等待暂停结束后，自动把该轮因 429 失败的 IP 重新测速；重试后仍失败则丢弃。设为 0 = 不重试。",
   "bandwidth_retry_rounds": 2,
-
-  "// latency_filter_percentage": "延迟排名筛选百分比：按 TCP 延迟排序后，只保留前 N% 的 IP 进入带宽测试。默认 40（取前 40%）。填 100=全部测试。",
   "latency_filter_percentage": 40,
-
-  "// use_proxy_for_collection": "是否只在采集 IP 阶段使用代理（env 里的 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY）：true=采集走代理（推荐，源多数被墙）；false=采集也直连。带宽测试/TCP 测试永远直连，不受此配置影响。",
+  "save_filter_mode": 1,
+  "delay_threshold": 200,
+  "speed_threshold": 50,
   "use_proxy_for_collection": true
 }

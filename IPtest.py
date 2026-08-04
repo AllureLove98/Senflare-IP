@@ -68,6 +68,7 @@ import ipaddress
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
+import shutil
 import urllib.parse
 from collections import defaultdict
 
@@ -148,6 +149,9 @@ REQUIRED_CONFIG_KEYS = [
     'bandwidth_retry_rounds',
     'latency_filter_percentage',
     'use_proxy_for_collection',
+    'save_filter_mode',
+    'delay_threshold',
+    'speed_threshold',
 ]
 
 # ===== 配置文件加载 =====
@@ -180,17 +184,13 @@ def load_config() -> None:
         logger.error(f"❌ 配置文件 {CONFIG_FILE} 格式错误（应为JSON对象），程序退出")
         sys.exit(1)
 
-    # 过滤以 // 开头的注释键（如 config.example.json 中的 "// 说明"）
-    user_config = {k: v for k, v in user_config.items() if not k.startswith('//')}
-
     # 提取 env 区块（运行参数/机密，如 LOG_LEVEL、GITHUB_TOKEN、HTTP_PROXY 等）
     # 优先级：已设置的容器环境变量 > config.json 中的 env 区块
     env_block = user_config.pop('env', None)
     if isinstance(env_block, dict):
         applied = 0
         for key, value in env_block.items():
-            # 跳过注释键（config.example.json 中以 // 开头的键，如 "// LOG_LEVEL"）
-            if key.startswith('//') or value is None:
+            if value is None:
                 continue
             # 非空环境变量才优先（空串视为未设置），否则 env 区块永远被 compose 默认值拦截
             if not os.getenv(key):
@@ -214,6 +214,13 @@ def load_config() -> None:
     if missing:
         logger.error(f"❌ 配置文件 {CONFIG_FILE} 缺少必需配置项: {', '.join(missing)}")
         logger.error("   请参考 config.example.json 补齐后重新启动")
+        sys.exit(1)
+
+    # 校验保存过滤模式：只允许 1（按延迟过滤）或 2（按速度过滤），其他值禁止无脑全量保存
+    _filter_mode = user_config.get('save_filter_mode')
+    if _filter_mode not in (1, 2):
+        logger.error(f"❌ 配置项 save_filter_mode 必须是 1（按延迟过滤）或 2（按速度过滤），当前值: {_filter_mode!r}")
+        logger.error("   请修改 config.json 后重新启动")
         sys.exit(1)
 
     CONFIG = user_config
@@ -716,6 +723,193 @@ def save_region_results(region_results: dict) -> None:
     with open(FILE_REGION_ALL, 'w', encoding='utf-8') as f:
         f.write('\n'.join(all_lines))
     logger.info(f"📄 已保存地区汇总 {total} 个有效节点到 {FILE_REGION_ALL}")
+
+# ===== 保存过滤引擎 =====
+# 统一过滤引擎：按 save_filter_mode 对全部输出文件执行「读取 -> 过滤 -> 覆写」
+# - MODE=1 按延迟过滤：延迟 < delay_threshold 的节点舍弃
+# - MODE=2 按速度过滤：速度 < speed_threshold 的节点舍弃
+# - 带指标文件（Senflare-Pro.txt / Region-All.txt / Ranking.txt）：解析延迟/速度后过滤
+# - 纯 IP 文件（IPlist*.txt / Region-*.txt）：联动删除带指标文件中被舍弃的 IP
+# - 无指标字段的行（含 Senflare.txt 基础版）：空值保护，默认保留并记录日志
+# - Ranking.txt 特殊：不删除节点行，改为在行尾追加「舍弃理由」标注
+# - 过滤前自动备份原文件为 {文件名}.bak，防止误删
+# - 文件缺失时不崩溃：输出警告日志并跳过该文件
+
+# 各输出文件的行格式正则（提取 IP / 延迟 / 速度）
+# Senflare-Pro.txt: 1.1.1.1-HK-中国香港节点-45Mbps-01
+_RE_FMT_PRO_REGION = re.compile(
+    r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})-[A-Z]{2}-.+?-(\d+(?:\.\d+)?)Mbps-\d+$')
+# Region-All.txt: 1.1.1.1#HK 中国香港节点 | 45Mbps | 01
+_RE_FMT_REGION_ALL = re.compile(
+    r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})#[A-Z]{2} .+ \| (\d+(?:\.\d+)?)Mbps \| \d+$')
+# Ranking.txt: 📊 [1/10] 1.1.1.1（延迟 12ms，带宽 45.67Mbps，评分 92.3）
+_RE_FMT_RANKING = re.compile(
+    r'^📊 \[\d+/\d+\] (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})（延迟 (\d+)ms，带宽 ([0-9.]+)Mbps，评分 [0-9.]+）')
+# 纯 IP 行
+_RE_IP_ONLY = re.compile(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$')
+
+
+def _filter_should_discard(delay, speed, mode, delay_threshold, speed_threshold):
+    """按当前过滤模式判定节点是否舍弃。返回 (是否舍弃, 舍弃理由或None)。
+    空值保护：指标字段缺失时默认保留，不丢弃。"""
+    if mode == 1:  # 按延迟过滤：延迟 < 阈值 舍弃
+        if delay is not None and delay < delay_threshold:
+            return True, f"延迟低于阈值{delay_threshold:g}ms"
+        return False, None
+    # mode == 2：按速度过滤：速度 < 阈值 舍弃
+    if speed is not None and speed < speed_threshold:
+        return True, f"速度低于阈值{speed_threshold:g}Mbps"
+    return False, None
+
+
+def _filter_metrics_file(path: str, parse_line, mode: int, delay_threshold: float,
+                         speed_threshold: float, is_ranking: bool = False) -> set:
+    """过滤带指标文件：解析每行提取(ip, delay, speed)，按规则舍弃。
+    Ranking 特殊：被舍弃的行不删除，改为追加「舍弃理由」标注。
+    返回本次被舍弃的 IP 集合（供纯 IP 文件联动）。
+    文件缺失时警告跳过；无法解析指标的行按空值保护规则保留。"""
+    if not os.path.exists(path):
+        logger.warning(f"⚠️ 文件 {path} 不存在，跳过过滤")
+        return set()
+    # 备份原文件，过滤为覆写操作
+    shutil.copy2(path, path + '.bak')
+
+    discarded = set()
+    kept_lines = []
+    unparsed = 0
+    with open(path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    for line in lines:
+        raw = line.rstrip('\n').rstrip('\r')
+        if not raw.strip():
+            continue
+        parsed = parse_line(raw)
+        if parsed is None:
+            unparsed += 1
+            kept_lines.append(raw)  # 空值保护：解析不出指标默认保留
+            continue
+        ip, delay, speed = parsed
+        discard, reason = _filter_should_discard(delay, speed, mode, delay_threshold, speed_threshold)
+        if discard:
+            discarded.add(ip)
+            if is_ranking:
+                # Ranking 特殊处理：不删除节点行，追加舍弃标注
+                kept_lines.append(f"{raw} [舍弃理由: {reason}]")
+        else:
+            kept_lines.append(raw)
+
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(kept_lines))
+        if kept_lines:
+            f.write('\n')
+
+    dropped = len([l for l in kept_lines if '[舍弃理由' in l]) if is_ranking else 0
+    logger.info(f"📄 过滤 {path}: 原 {len(lines)} 行 -> 保留 {len(kept_lines)} 行，舍弃 {len(discarded)} 个节点"
+                + (f"，标注 {dropped} 行" if is_ranking else ""))
+    if unparsed:
+        logger.warning(f"⚠️ {path}: {unparsed} 行无法解析指标字段，按空值保护规则默认保留")
+    return discarded
+
+
+def _filter_plain_ip_file(path: str, discarded: set) -> None:
+    """过滤纯 IP 文件：删除 discarded 集合中已被判定舍弃的 IP。
+    联动逻辑：带指标文件舍弃的 IP，从对应的纯 IP 文件一并移除。"""
+    if not os.path.exists(path):
+        logger.warning(f"⚠️ 文件 {path} 不存在，跳过过滤")
+        return
+    if not discarded:
+        logger.debug(f"ℹ️ {path}: 无被舍弃的IP，跳过")
+        return
+    shutil.copy2(path, path + '.bak')
+
+    kept = []
+    removed = 0
+    with open(path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    for line in lines:
+        ip = line.strip()
+        if not ip:
+            continue
+        if ip in discarded:
+            removed += 1
+            continue
+        kept.append(ip)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(kept))
+        if kept:
+            f.write('\n')
+    logger.info(f"📄 过滤 {path}: 原 {len(lines)} 行 -> 保留 {len(kept)} 行，联动删除 {removed} 个被舍弃IP")
+
+
+def apply_save_filter() -> None:
+    """统一保存过滤引擎入口：作用于全部 6 类输出文件。
+    - 带指标文件：Senflare-Pro.txt / Region-All.txt / Ranking.txt（标注不舍弃）
+    - 纯 IP 文件：IPlist.txt / IPlist-Pro.txt / Region-*.txt（联动删除）
+    - 基础版 Senflare.txt：无指标字段，空值保护全保留（仅记录日志）
+    配置非法（save_filter_mode 非 1/2）时启动阶段已拦截，这里仅防御性再校验。"""
+    mode = CONFIG.get('save_filter_mode')
+    if mode not in (1, 2):
+        logger.error(f"❌ save_filter_mode 非法: {mode!r}，禁止无脑全量保存，跳过过滤")
+        sys.exit(1)
+    delay_threshold = float(CONFIG.get('delay_threshold', 200))
+    speed_threshold = float(CONFIG.get('speed_threshold', 50))
+    mode_label = "延迟" if mode == 1 else "速度"
+    logger.info(f"🔍 ===== 保存过滤（按{mode_label}） =====")
+    if mode == 1:
+        logger.info(f"ℹ️ 规则: 延迟 < {delay_threshold:g}ms 的节点舍弃")
+    else:
+        logger.info(f"ℹ️ 规则: 速度 < {speed_threshold:g}Mbps 的节点舍弃")
+    logger.info("ℹ️ 过滤前已自动备份原文件为 .bak，防止误删")
+
+    # 1. 带指标文件（Ranking 特殊：标注不舍弃）
+    discarded = set()
+    discarded |= _filter_metrics_file(
+        FILE_RANKING, lambda l: _parse_ranking_line(l), mode, delay_threshold, speed_threshold,
+        is_ranking=True)
+    discarded |= _filter_metrics_file(
+        FILE_PRO_REGION, lambda l: _parse_pro_region_line(l), mode, delay_threshold, speed_threshold)
+    discarded |= _filter_metrics_file(
+        FILE_REGION_ALL, lambda l: _parse_region_all_line(l), mode, delay_threshold, speed_threshold)
+
+    # 2. 纯 IP 文件：联动删除被舍弃的IP
+    _filter_plain_ip_file(FILE_BASIC_IP, discarded)
+    _filter_plain_ip_file(FILE_PRO_IP, discarded)
+    for region_file in glob.glob(f'{FILE_REGION_PREFIX}*.txt'):
+        if region_file == FILE_REGION_ALL:  # 汇总文件已在上方处理，排除避免重复
+            continue
+        _filter_plain_ip_file(region_file, discarded)
+
+    # 3. 基础版 Senflare.txt：无延迟/速度字段，空值保护全保留
+    _filter_metrics_file(
+        FILE_BASIC_REGION, lambda l: None, mode, delay_threshold, speed_threshold)
+
+    logger.info(f"🏁 保存过滤完成，共舍弃 {len(discarded)} 个节点")
+
+
+def _parse_pro_region_line(line: str):
+    """解析 Senflare-Pro.txt 行: 1.1.1.1-HK-中国香港节点-45Mbps-01 -> (ip, None, speed)"""
+    m = _RE_FMT_PRO_REGION.match(line)
+    if m:
+        return (m.group(1), None, float(m.group(2)))
+    return None
+
+
+def _parse_region_all_line(line: str):
+    """解析 Region-All.txt 行: 1.1.1.1#HK 中国香港节点 | 45Mbps | 01 -> (ip, None, speed)"""
+    m = _RE_FMT_REGION_ALL.match(line)
+    if m:
+        return (m.group(1), None, float(m.group(2)))
+    return None
+
+
+def _parse_ranking_line(line: str):
+    """解析 Ranking.txt 行: 📊 [1/10] 1.1.1.1（延迟 12ms，带宽 45.67Mbps，评分 92.3）
+    -> (ip, delay, speed)"""
+    m = _RE_FMT_RANKING.match(line)
+    if m:
+        return (m.group(1), float(m.group(2)), float(m.group(3)))
+    return None
 
 # ===== 网络检测模块 =====
 # 网络连接测试功能，包括TCP连接、延迟测试、带宽测试等
@@ -1681,7 +1875,7 @@ def main() -> None:
         # 同一地区内按延迟排序（更快的在前）
         sorted_ips = sorted(region_groups[region], key=lambda x: x[2])  # 按min_delay排序
         for idx, (ip, code, min_delay, avg_delay) in enumerate(sorted_ips, 1):
-            result.append(f"{ip}#{code} {region}节点 | {idx:02d}")
+            result.append(f"{ip}-{code}-{region}节点-{idx:02d}")
         logger.debug(f"地区 {region} 格式化完成，包含 {len(sorted_ips)} 个IP")
     
     if result:
@@ -1762,7 +1956,7 @@ def main() -> None:
                 # 同一地区内按带宽降序（速度更快的在前）
                 sorted_ips = sorted(items, key=lambda x: x[4], reverse=True)  # 按带宽排序
                 for idx, (ip, code, min_delay, avg_delay, bandwidth) in enumerate(sorted_ips, 1):
-                    pro_result.append(f"{ip}#{code} {region}节点 | {bandwidth:.0f}Mbps | {idx:02d}")
+                    pro_result.append(f"{ip}-{code}-{region}节点-{bandwidth:.0f}Mbps-{idx:02d}")
                 logger.debug(f"高级地区 {region} 格式化完成，包含 {len(sorted_ips)} 个IP")
             
             if pro_result:
@@ -1790,6 +1984,11 @@ def main() -> None:
         save_region_results(region_results)
     else:
         logger.info("ℹ️ 地区定向扫描未开启（region_targets 为空数组），如需按国家地区筛选请配置 region_targets")
+
+    # 10.6 保存过滤（统一过滤引擎）：对全部输出文件执行 读取->过滤->覆写
+    # save_filter_mode=1 按延迟过滤（延迟<delay_threshold 舍弃），=2 按速度过滤（速度<speed_threshold 舍弃）
+    # Ranking.txt 特殊：不删除节点，仅追加舍弃标注；过滤前自动备份 .bak；缺失文件警告跳过
+    apply_save_filter()
 
     # 11. 显示统计信息
     # 显示运行统计信息（缓存由入口finally统一保存）
