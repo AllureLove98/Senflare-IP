@@ -3,7 +3,7 @@
 # 构建: docker build -t allurelove98/senflare-ip:latest .
 FROM python:3.12-slim
 
-# 时区与必要工具（git 用于 entrypoint.sh 的结果推送）
+# 时区与必要工具（git 用于 push_results.sh 的结果推送）
 ENV TZ=Asia/Shanghai \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
@@ -25,9 +25,9 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 拷贝程序文件（不内置 config.json：全部配置必须由外部挂载提供，缺失时程序启动即报错退出）
-COPY IPtest.py entrypoint.sh ./
+COPY IPtest.py entrypoint.sh push_results.sh ./
 
-RUN chmod +x /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh /app/push_results.sh
 
 # 健康检查：进程存在即可
 HEALTHCHECK --interval=300s --timeout=10s --retries=3 \

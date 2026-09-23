@@ -48,81 +48,26 @@ run_cycle() {
     cp -f IPlist.txt Senflare.txt IPlist-Pro.txt Senflare-Pro.txt Ranking.txt Cache.json IPtest.log /app/output/ 2>/dev/null || true
   fi
 
-  # ===== 推送结果到独立分支（避免与 main 代码分支冲突）=====
-  # 默认推送到 results 分支，可用环境变量 GIT_RESULT_BRANCH 修改
-  GIT_RESULT_BRANCH="${GIT_RESULT_BRANCH:-results}"
+  # ===== 推送结果到 GitHub（独立分支，避免与 main 代码分支冲突）=====
+  # 推送逻辑已拆分为独立脚本 push_results.sh，可以单独手动执行：
+  #   sh /app/push_results.sh        # 手动推送（忽略 GIT_PUSH_ENABLED 开关）
+  #   sh /app/push_results.sh -n     # dry-run：只检查不推送
+  #   sh /app/push_results.sh -h     # 查看全部参数
+  PUSH_SCRIPT="/app/push_results.sh"
+  if [ ! -f "$PUSH_SCRIPT" ]; then
+    PUSH_SCRIPT="$(dirname "$0")/push_results.sh"
+  fi
 
-  # 开关：未显式启用则跳过推送
-  if [ "${GIT_PUSH_ENABLED:-false}" != "true" ]; then
-    echo "$LOG_PREFIX Git push disabled (set GIT_PUSH_ENABLED=true to enable); skipping upload"
+  if [ ! -f "$PUSH_SCRIPT" ]; then
+    echo "$LOG_PREFIX push_results.sh not found; skipping upload"
     return 0
   fi
 
-  if [ -n "${REPO_URL:-}" ]; then
-    remote_url="$REPO_URL"
-  elif [ -n "${GITHUB_REPOSITORY:-}" ]; then
-    remote_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-  else
-    echo "$LOG_PREFIX No GitHub token or repo URL configured; skipping upload"
-    return 0
+  # --auto：遵循 GIT_PUSH_ENABLED 开关；--force：推送失败时强制推送兜底
+  echo "$LOG_PREFIX Running push_results.sh (auto mode)"
+  if ! sh "$PUSH_SCRIPT" --auto --force; then
+    echo "$LOG_PREFIX push_results.sh exited with an error; continuing after the interval"
   fi
-
-  if ! command -v git >/dev/null 2>&1; then
-    echo "$LOG_PREFIX Git is not installed in this container; skipping upload"
-    return 0
-  fi
-
-  # 独立结果仓库：只包含输出文件，绝不触碰 /app 代码文件
-  RESULTS_DIR="/app/results-repo"
-  mkdir -p "$RESULTS_DIR"
-  cd "$RESULTS_DIR"
-
-  # 初始化结果仓库（仅首次）
-  if [ ! -d .git ]; then
-    echo "$LOG_PREFIX Initializing results repository in $RESULTS_DIR"
-    git init >/dev/null 2>&1 || true
-  fi
-  # 确保 remote 存在（每次运行都执行，防止重建容器后 remote 丢失）
-  git remote add origin "$remote_url" >/dev/null 2>&1 || git remote set-url origin "$remote_url"
-  git config user.name "${GIT_USER_NAME:-GitHub Action}"
-  git config user.email "${GIT_USER_EMAIL:-action@github.com}"
-  git config --global --add safe.directory "$RESULTS_DIR" >/dev/null 2>&1 || true
-
-  # 确保在结果分支上（-B：不存在则创建，存在则切换）
-  if [ "$(git branch --show-current 2>/dev/null)" != "$GIT_RESULT_BRANCH" ]; then
-    git checkout -B "$GIT_RESULT_BRANCH" >/dev/null 2>&1 || true
-  fi
-
-  # 以远端为基准对齐（reset --hard 彻底避免 fetch first 冲突）
-  git fetch origin "$GIT_RESULT_BRANCH" >/dev/null 2>&1 || true
-  if git rev-parse --verify "origin/$GIT_RESULT_BRANCH" >/dev/null 2>&1; then
-    git reset --hard "origin/$GIT_RESULT_BRANCH" >/dev/null 2>&1 || true
-  fi
-
-  # 同步最新输出文件（必须在 reset 之后，用新结果覆盖旧结果）
-  for file in IPlist.txt Senflare.txt IPlist-Pro.txt Senflare-Pro.txt Ranking.txt Cache.json IPtest.log; do
-    if [ -f "/app/$file" ]; then
-      cp -f "/app/$file" "$RESULTS_DIR/" 2>/dev/null || true
-    fi
-  done
-
-  # 提交并推送
-  git add -A >/dev/null 2>&1 || true
-  if git diff --cached --quiet 2>/dev/null; then
-    echo "$LOG_PREFIX No changes to commit; results up to date"
-    return 0
-  fi
-
-  UTC_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-  git commit -m "${COMMIT_MESSAGE:-Update IP results} ${UTC_TIME}" >/dev/null 2>&1 || {
-    echo "$LOG_PREFIX Commit failed"
-    return 0
-  }
-
-  echo "$LOG_PREFIX Pushing results to branch '$GIT_RESULT_BRANCH'"
-  git push origin "HEAD:$GIT_RESULT_BRANCH" 2>/dev/null \
-    || git push -f origin "HEAD:$GIT_RESULT_BRANCH" 2>/dev/null \
-    || echo "$LOG_PREFIX Push to '$GIT_RESULT_BRANCH' failed"
 }
 
 while true; do

@@ -12,8 +12,13 @@ Senflare.txt
 IPlist-Pro.txt
 Senflare-Pro.txt
 Ranking.txt
+Region-All.txt
+Region-*.txt
 Cache.json
 output/
+
+# 本地结果推送仓库（push_results.sh 使用）
+results-repo/
 
 # 本地说明文档（不提交）
 优化建议.md
